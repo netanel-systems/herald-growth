@@ -1,0 +1,23 @@
+# Environment
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# Data (persistent state — not in git)
+data/
+
+# Drafts
+drafts/
+
+# Lock files
+*.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
