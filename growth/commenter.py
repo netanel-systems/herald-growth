@@ -5,6 +5,9 @@ and writes the comments — this module handles posting and dedup.
 
 Comments are 1-2 sentences, specific to the article, natural.
 See knowledge/comment-style-guide.md for rules.
+
+Write operations use Playwright headless browser when available
+(Forem API doesn't support comments for regular users).
 """
 
 import json
@@ -13,6 +16,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from growth.browser import DevToBrowser
 from growth.client import DevToClient, DevToError
 from growth.config import GrowthConfig
 from growth.storage import load_json_ids, save_json_ids
@@ -21,11 +25,21 @@ logger = logging.getLogger(__name__)
 
 
 class CommentEngine:
-    """Posts comments and manages comment history with dedup."""
+    """Posts comments and manages comment history with dedup.
 
-    def __init__(self, client: DevToClient, config: GrowthConfig) -> None:
+    When a browser instance is provided, uses Playwright for posting.
+    Falls back to API client (admin-only, will fail for regular users).
+    """
+
+    def __init__(
+        self,
+        client: DevToClient,
+        config: GrowthConfig,
+        browser: DevToBrowser | None = None,
+    ) -> None:
         self.client = client
         self.config = config
+        self.browser = browser
         self.data_dir = config.abs_data_dir
 
     def load_commented_ids(self) -> set[int]:
@@ -61,10 +75,12 @@ class CommentEngine:
         body: str,
         article_title: str = "",
         author: str = "",
+        article_url: str = "",
     ) -> dict | None:
         """Post a comment and log it.
 
-        Returns the API response dict on success, None on failure.
+        Uses Playwright browser when available, otherwise API client.
+        Returns result dict on success, None on failure.
         """
         # Validate comment quality before posting
         if not self._validate_comment(body):
@@ -75,22 +91,53 @@ class CommentEngine:
             return None
 
         try:
-            result = self.client.post_comment(article_id, body)
+            # Use browser for posting when enabled
+            if self.config.use_browser:
+                if self.browser is None:
+                    logger.error(
+                        "Browser mode enabled but no browser instance provided. "
+                        "Cannot post comment on article %d.", article_id,
+                    )
+                    return None
+                if not article_url:
+                    logger.warning(
+                        "No article URL for browser comment on %d. Skipping.",
+                        article_id,
+                    )
+                    return None
+                result = self.browser.post_comment(article_id, body, article_url)
+                method = "browser"
+            else:
+                result = self.client.post_comment(article_id, body)
+                method = "api"
+
+            if result is None:
+                logger.warning(
+                    "Comment posting returned None for article %d via %s.",
+                    article_id, method,
+                )
+                return None
+
             logger.info(
-                "Comment posted on article %d (%s): '%s'",
-                article_id, author, body[:60],
+                "Comment posted on article %d (%s) via %s: '%s'",
+                article_id, author, method, body[:60],
             )
 
             # Log to comment history (for learner)
             self._log_comment(article_id, body, article_title, author, result)
 
             # Log to engagement log
-            self._log_engagement(article_id, body, article_title, author)
+            self._log_engagement(article_id, body, article_title, author, method)
 
             return result
 
         except DevToError as e:
             logger.exception("Failed to post comment on article %d: %s", article_id, e)
+            return None
+        except Exception as e:
+            logger.exception(
+                "Unexpected error posting comment on article %d: %s", article_id, e,
+            )
             return None
 
     def _validate_comment(self, body: str) -> bool:
@@ -170,6 +217,7 @@ class CommentEngine:
         body: str,
         article_title: str,
         author: str,
+        method: str = "api",
     ) -> None:
         """Append to shared engagement_log.jsonl."""
         path = self.data_dir / "engagement_log.jsonl"
@@ -181,6 +229,26 @@ class CommentEngine:
             "article_title": article_title[:100],
             "author": author,
             "comment_length": len(body),
+            "method": method,
         }
         with open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
+        # Periodic trim after each write to prevent unbounded growth
+        self.trim_engagement_log()
+
+    def trim_engagement_log(self) -> None:
+        """Trim engagement log to max_engagement_log entries.
+
+        Prevents unbounded growth. Same logic as ReactionEngine.
+        """
+        path = self.data_dir / "engagement_log.jsonl"
+        if not path.exists():
+            return
+        lines = path.read_text().strip().split("\n")
+        if len(lines) > self.config.max_engagement_log:
+            trimmed = lines[-self.config.max_engagement_log:]
+            path.write_text("\n".join(trimmed) + "\n")
+            logger.info(
+                "Trimmed engagement log: %d -> %d entries.",
+                len(lines), len(trimmed),
+            )
