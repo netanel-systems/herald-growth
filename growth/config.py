@@ -63,6 +63,25 @@ class GrowthConfig(BaseSettings):
         description="Minimum reactions on article before we comment (quality filter)",
     )
 
+    # --- Browser Settings (Playwright for write operations) ---
+    # API doesn't support reactions/comments for regular users.
+    # Browser automation handles all write operations.
+    devto_email: str = ""
+    devto_password: str = ""
+    browser_headless: bool = True
+    browser_timeout: int = Field(
+        default=30, ge=5, le=120,
+        description="Page timeout in seconds for browser actions",
+    )
+    browser_user_agent: str = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+    use_browser: bool = Field(
+        default=True,
+        description="Use Playwright browser for write ops (reactions, comments)",
+    )
+
     # --- Target Tags ---
     target_tags: list[str] = Field(default_factory=lambda: DEFAULT_TARGET_TAGS.copy())
 

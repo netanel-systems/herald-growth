@@ -1,8 +1,11 @@
 """ReactionEngine — react to articles on dev.to.
 
-Standalone cron entry point. Runs every 30 minutes via Python (no LLM needed).
+Standalone cron entry point. Runs every 10 minutes via Python (no LLM needed).
 Finds rising + fresh articles across target tags, reacts with varied categories,
 logs everything to engagement_log.jsonl.
+
+Write operations use Playwright headless browser (Forem API doesn't support
+reactions/comments for regular users — admin-only endpoints).
 
 Usage:
     python -m growth.reactor
@@ -16,6 +19,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from growth.browser import BrowserError, BrowserLoginRequired, DevToBrowser
 from growth.client import DevToClient, DevToError
 from growth.config import GrowthConfig, load_config
 from growth.scout import ArticleScout
@@ -39,13 +43,18 @@ def pick_reaction_category() -> str:
 
 
 class ReactionEngine:
-    """Reacts to trending dev.to articles. Runs as standalone cron job."""
+    """Reacts to trending dev.to articles. Runs as standalone cron job.
+
+    Uses Playwright browser for reactions when config.use_browser is True.
+    Falls back to API client (admin-only, will fail for regular users).
+    """
 
     def __init__(self, config: GrowthConfig) -> None:
         self.config = config
         self.client = DevToClient(config)
         self.scout = ArticleScout(self.client, config)
         self.data_dir = config.abs_data_dir
+        self._browser: DevToBrowser | None = None
 
     def load_reacted_ids(self) -> set[int]:
         """Load article IDs we already reacted to."""
@@ -92,86 +101,138 @@ class ReactionEngine:
                 len(lines), len(trimmed),
             )
 
+    def _start_browser(self) -> DevToBrowser:
+        """Lazy-init and start the browser if not already running."""
+        if self._browser is None:
+            self._browser = DevToBrowser(self.config)
+            self._browser.start()
+        return self._browser
+
+    def _stop_browser(self) -> None:
+        """Stop browser if running."""
+        if self._browser is not None:
+            self._browser.stop()
+            self._browser = None
+
+    def _react_via_browser(
+        self, article_id: int, category: str, article_url: str,
+    ) -> tuple[bool, bool]:
+        """React to an article using Playwright browser."""
+        browser = self._start_browser()
+        return browser.react_to_article(article_id, category, article_url)
+
+    def _react_via_api(
+        self, article_id: int, category: str,
+    ) -> tuple[bool, bool]:
+        """React to an article using the API (admin-only — will fail for regular users)."""
+        return self.client.react_to_article(article_id, category=category)
+
     def run(self) -> dict:
         """Main entry point for cron. Finds articles, reacts, logs.
 
+        Uses Playwright browser for reactions when config.use_browser is True.
         Returns summary dict with counts for monitoring.
         """
-        logger.info("=== Reaction cycle starting ===")
+        logger.info("=== Reaction cycle starting (browser=%s) ===", self.config.use_browser)
         start = time.time()
 
-        reacted_ids = self.load_reacted_ids()
-        commented_ids = self.load_commented_ids()
+        try:
+            reacted_ids = self.load_reacted_ids()
+            commented_ids = self.load_commented_ids()
 
-        # Find articles: mix of rising + fresh
-        rising = self.scout.find_rising_articles(count=self.config.max_reactions_per_run)
-        fresh = self.scout.find_fresh_articles(count=self.config.max_reactions_per_run)
+            # Find articles: mix of rising + fresh
+            rising = self.scout.find_rising_articles(count=self.config.max_reactions_per_run)
+            fresh = self.scout.find_fresh_articles(count=self.config.max_reactions_per_run)
 
-        # Merge, dedupe, filter
-        seen_ids: set[int] = set()
-        candidates: list[dict] = []
-        for article in rising + fresh:
-            aid = article.get("id")
-            if aid and aid not in seen_ids:
-                seen_ids.add(aid)
-                candidates.append(article)
+            # Merge, dedupe, filter
+            seen_ids: set[int] = set()
+            candidates: list[dict] = []
+            for article in rising + fresh:
+                aid = article.get("id")
+                if aid and aid not in seen_ids:
+                    seen_ids.add(aid)
+                    candidates.append(article)
 
-        candidates = self.scout.filter_own_articles(candidates)
-        candidates = self.scout.filter_already_engaged(
-            candidates, reacted_ids, commented_ids,
-        )
+            candidates = self.scout.filter_own_articles(candidates)
+            candidates = self.scout.filter_already_engaged(
+                candidates, reacted_ids, commented_ids,
+            )
 
-        # React to top N
-        reacted_count = 0
-        skipped_count = 0
-        failed_count = 0
-        new_reacted: set[int] = set()
+            # React to top N (cap at 20 for rate-limit safety per CLAUDE.md)
+            max_reactions = min(self.config.max_reactions_per_run, 20)
+            reacted_count = 0
+            skipped_count = 0
+            failed_count = 0
+            new_reacted: set[int] = set()
 
-        for article in candidates[:self.config.max_reactions_per_run]:
-            aid = article.get("id")
-            if not aid:
-                skipped_count += 1
-                continue
+            for idx, article in enumerate(candidates[:max_reactions]):
+                aid = article.get("id")
+                if not aid:
+                    skipped_count += 1
+                    continue
 
-            category = pick_reaction_category()
-            success, rate_limited = self.client.react_to_article(aid, category=category)
+                category = pick_reaction_category()
+                article_url = article.get("url", "")
 
-            if success:
-                reacted_count += 1
-                new_reacted.add(aid)
-                self.log_engagement("reaction", article, {"category": category})
-            else:
-                failed_count += 1
-                if rate_limited:
-                    logger.info("Rate limited on article %d. Stopping early.", aid)
-                    break
-                logger.info("Reaction failed on article %d. Continuing.", aid)
-                continue
+                if self.config.use_browser:
+                    if not article_url:
+                        logger.warning("No URL for article %d. Skipping.", aid)
+                        skipped_count += 1
+                        continue
+                    success, rate_limited = self._react_via_browser(
+                        aid, category, article_url,
+                    )
+                else:
+                    success, rate_limited = self._react_via_api(aid, category)
 
-            # Respect rate limit delay
-            if reacted_count < self.config.max_reactions_per_run:
-                time.sleep(self.config.reaction_delay)
+                if success:
+                    reacted_count += 1
+                    new_reacted.add(aid)
+                    self.log_engagement("reaction", article, {
+                        "category": category,
+                        "method": "browser" if self.config.use_browser else "api",
+                    })
+                else:
+                    failed_count += 1
+                    if rate_limited:
+                        logger.info("Rate limited on article %d. Stopping early.", aid)
+                        break
+                    logger.info("Reaction failed on article %d. Continuing.", aid)
 
-        # Save updated reacted IDs
-        reacted_ids.update(new_reacted)
-        self.save_reacted_ids(reacted_ids)
+                # Delay after every attempt (success or fail) for rate-limit safety
+                if idx < max_reactions - 1:
+                    time.sleep(self.config.reaction_delay)
 
-        # Periodic log trimming
-        self.trim_engagement_log()
+            # Save updated reacted IDs
+            reacted_ids.update(new_reacted)
+            self.save_reacted_ids(reacted_ids)
 
-        elapsed = time.time() - start
-        summary = {
-            "reacted": reacted_count,
-            "skipped": skipped_count,
-            "failed": failed_count,
-            "candidates": len(candidates),
-            "elapsed_seconds": round(elapsed, 1),
-        }
-        logger.info(
-            "=== Reaction cycle complete: %d reacted, %d failed, %.1fs ===",
-            reacted_count, failed_count, elapsed,
-        )
-        return summary
+            # Periodic log trimming
+            self.trim_engagement_log()
+
+            elapsed = time.time() - start
+            summary = {
+                "reacted": reacted_count,
+                "skipped": skipped_count,
+                "failed": failed_count,
+                "candidates": len(candidates),
+                "method": "browser" if self.config.use_browser else "api",
+                "elapsed_seconds": round(elapsed, 1),
+            }
+            logger.info(
+                "=== Reaction cycle complete: %d reacted, %d failed, %.1fs ===",
+                reacted_count, failed_count, elapsed,
+            )
+            return summary
+
+        except BrowserLoginRequired as exc:
+            logger.exception("Browser login required — cycle aborted: %s", exc)
+            return {"error": str(exc), "elapsed_seconds": round(time.time() - start, 1)}
+        except BrowserError as exc:
+            logger.exception("Browser error — cycle aborted: %s", exc)
+            return {"error": str(exc), "elapsed_seconds": round(time.time() - start, 1)}
+        finally:
+            self._stop_browser()
 
 
 def main() -> None:
@@ -187,7 +248,11 @@ def main() -> None:
         engine = ReactionEngine(config)
         summary = engine.run()
         print(json.dumps(summary, indent=2))
-    except DevToError as e:
+        # Exit non-zero if run() returned an error (browser failures)
+        if "error" in summary:
+            logger.error("Cycle completed with error. Exiting non-zero for cron/monitoring.")
+            sys.exit(1)
+    except (DevToError, BrowserError) as e:
         logger.error("Reaction engine failed: %s", e)
         sys.exit(1)
     except Exception as e:
