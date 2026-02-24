@@ -189,8 +189,23 @@ class ReactionEngine:
                 candidates, reacted_ids, commented_ids,
             )
 
-            # React to top N (cap at 20 for rate-limit safety per CLAUDE.md)
+            # Only proceed if we have enough NEW articles (worth opening browser)
             max_reactions = min(self.config.max_reactions_per_run, 20)
+            if len(candidates) < max_reactions:
+                elapsed = time.time() - start
+                logger.info(
+                    "Only %d new candidates (need %d). Skipping cycle. %.1fs",
+                    len(candidates), max_reactions, elapsed,
+                )
+                return {
+                    "reacted": 0,
+                    "skipped": len(candidates),
+                    "failed": 0,
+                    "candidates": len(candidates),
+                    "method": "skipped",
+                    "reason": f"only {len(candidates)} new (need {max_reactions})",
+                    "elapsed_seconds": round(elapsed, 1),
+                }
             reacted_count = 0
             skipped_count = 0
             failed_count = 0
