@@ -16,19 +16,29 @@ logger = logging.getLogger(__name__)
 DEFAULT_TARGET_TAGS: list[str] = [
     # Core — our domain
     "ai", "python", "machinelearning", "langchain",
-    "llm", "agents", "genai", "deeplearning",
-    # Dev general
-    "programming", "beginners", "tutorial", "webdev",
-    "javascript", "typescript", "react", "nextjs",
+    "llm", "chatgpt", "datascience", "algorithms",
+    # Web & frontend
+    "webdev", "javascript", "typescript", "react",
+    "nextjs", "vue", "angular", "css", "html", "frontend",
+    # Backend & languages
+    "node", "go", "rust", "java", "csharp", "php",
+    "ruby", "cpp", "django", "laravel",
     # Ops & infra
     "devops", "docker", "kubernetes", "cloud",
-    "aws", "linux", "git", "cicd",
+    "aws", "azure", "linux", "git", "serverless",
+    "microservices", "cicd", "automation",
+    # Data & storage
+    "database", "sql", "mongodb", "postgres", "graphql", "api",
     # Community & growth
-    "opensource", "career", "discuss", "productivity",
-    "architecture", "testing", "database", "api",
-    # Trending niches
-    "rust", "golang", "node", "fastapi",
-    "security", "blockchain", "datascience", "computerscience",
+    "programming", "beginners", "tutorial", "productivity",
+    "opensource", "career", "discuss", "showdev",
+    "architecture", "testing", "computerscience",
+    "softwareengineering", "coding", "performance",
+    # Mobile & other
+    "mobile", "android", "flutter", "reactnative",
+    # Security & emerging
+    "security", "cybersecurity", "blockchain", "startup",
+    "gamedev", "vscode", "github",
 ]
 
 
