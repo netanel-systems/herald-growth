@@ -159,7 +159,21 @@ class DevToBrowser:
     # --- Lifecycle ---
 
     def start(self) -> None:
-        """Launch headless Chromium and create browser context."""
+        """Launch headless Chromium and create browser context.
+
+        Validates credentials are configured before launching browser.
+        Raises BrowserLoginRequired if email/password are missing and
+        no stored session exists.
+        """
+        # Validate credentials early — fail fast, not after launching browser
+        has_session = self._has_stored_session()
+        has_credentials = bool(self.config.devto_email and self.config.devto_password)
+        if not has_session and not has_credentials:
+            raise BrowserLoginRequired(
+                "No stored session and no credentials configured. "
+                "Set GROWTH_DEVTO_EMAIL and GROWTH_DEVTO_PASSWORD in .env"
+            )
+
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(
             headless=self.config.browser_headless,
@@ -214,25 +228,78 @@ class DevToBrowser:
     # --- Authentication ---
 
     def _has_stored_session(self) -> bool:
-        """Check if browser_state.json exists and has cookies."""
+        """Check if browser_state.json exists and has non-expired cookies.
+
+        Proactively checks cookie expiration timestamps to avoid loading
+        stale sessions that will fail immediately (H1 fix).
+        """
         if not self._storage_path.exists():
             return False
         try:
             data = json.loads(self._storage_path.read_text())
-            return bool(data.get("cookies"))
+            cookies = data.get("cookies", [])
+            if not cookies:
+                return False
+
+            # Check if key session cookies are expired
+            now = time.time()
+            session_cookies = [
+                c for c in cookies
+                if "devto" in c.get("name", "").lower()
+                or "forem" in c.get("name", "").lower()
+                or "_session" in c.get("name", "").lower()
+                or "remember" in c.get("name", "").lower()
+            ]
+
+            if session_cookies:
+                for cookie in session_cookies:
+                    expires = cookie.get("expires", -1)
+                    # expires=-1 means session cookie (valid until browser close)
+                    # expires=0 or past timestamp means expired
+                    if expires > 0 and expires < now:
+                        logger.warning(
+                            "Session cookie '%s' expired at %s. Clearing stale session.",
+                            cookie.get("name", "?"),
+                            time.strftime("%Y-%m-%d %H:%M", time.localtime(expires)),
+                        )
+                        return False
+
+            return True
         except (json.JSONDecodeError, OSError):
             return False
 
+    # Fallback selectors for logged-in detection (meta tag may not exist on all pages)
+    SELS_LOGGED_IN_FALLBACK = (
+        'meta[name="user-signed-in"][content="true"]',
+        'a[href="/new"]',              # "Create Post" link (only visible when logged in)
+        'button[aria-label="Navigation menu"]',  # Mobile nav (logged-in)
+        'a[href="/notifications"]',    # Notifications bell
+        'img.crayons-avatar',          # User avatar in nav
+    )
+
     def _is_logged_in(self) -> bool:
-        """Check if current page shows logged-in state."""
+        """Check if current page shows logged-in state.
+
+        Uses multiple fallback indicators since the meta tag may not
+        exist on all page types (modals, redirects, etc).
+        """
         if self._page is None:
             return False
         try:
             current_url = self._page.url
             if not current_url.startswith(self.BASE_URL):
                 self._page.goto(self.BASE_URL, wait_until="domcontentloaded")
-            meta = self._page.query_selector(self.SEL_LOGGED_IN)
-            return meta is not None
+
+            # Try each indicator — any one match means logged in
+            for selector in self.SELS_LOGGED_IN_FALLBACK:
+                try:
+                    el = self._page.query_selector(selector)
+                    if el is not None:
+                        return True
+                except Exception:
+                    continue
+
+            return False
         except PlaywrightTimeoutError:
             return False
 
@@ -258,6 +325,13 @@ class DevToBrowser:
         try:
             self._page.goto(self.LOGIN_URL, wait_until="domcontentloaded")
             self._human_delay(1.0, 2.0)
+
+            # dev.to redirects to homepage if session is still valid.
+            # Check if we're already logged in after the redirect.
+            if self._is_logged_in():
+                logger.info("Already logged in (redirect from login page). Session valid.")
+                self._save_session()
+                return True
 
             # Check for CAPTCHA before interacting
             if self._detect_captcha():
@@ -288,7 +362,7 @@ class DevToBrowser:
                 logger.error("Login submit button not found (all selectors failed).")
                 return False
             submit_btn.click()
-            self._page.wait_for_load_state("networkidle")
+            self._page.wait_for_load_state("domcontentloaded")
             self._human_delay(1.0, 2.0)
 
             # Check for CAPTCHA after submit (challenge may appear post-submit)
@@ -372,7 +446,7 @@ class DevToBrowser:
                 logger.error("Browser page not initialized for reaction.")
                 return False, False
 
-            self._page.goto(article_url, wait_until="networkidle")
+            self._page.goto(article_url, wait_until="domcontentloaded")
             self._human_delay(1.5, 3.0)
 
             # The sidebar heart icon is #reaction-drawer-trigger.
@@ -537,15 +611,15 @@ class DevToBrowser:
             submit_btn.click()
 
             # Wait for submission
-            self._page.wait_for_load_state("networkidle")
+            self._page.wait_for_load_state("domcontentloaded")
             self._human_delay(1.0, 2.0)
 
             # Verify: check if our comment text appears on the page
             posted = False
             try:
-                self._page.locator(
-                    f"text={body_markdown[:40]}"
-                ).wait_for(timeout=5000)
+                self._page.get_by_text(
+                    body_markdown[:40], exact=False,
+                ).first.wait_for(timeout=5000)
                 posted = True
             except PlaywrightTimeoutError:
                 # Fallback: check if textarea was cleared

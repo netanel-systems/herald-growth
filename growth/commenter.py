@@ -237,17 +237,33 @@ class CommentEngine:
         self.trim_engagement_log()
 
     def trim_engagement_log(self) -> None:
-        """Trim engagement log to max_engagement_log entries.
+        """Trim engagement log to max_engagement_log entries. Atomic write.
 
         Prevents unbounded growth. Same logic as ReactionEngine.
         """
+        import os
+        import tempfile
+
         path = self.data_dir / "engagement_log.jsonl"
         if not path.exists():
             return
-        lines = path.read_text().strip().split("\n")
+        lines = [l for l in path.read_text().strip().split("\n") if l.strip()]
         if len(lines) > self.config.max_engagement_log:
             trimmed = lines[-self.config.max_engagement_log:]
-            path.write_text("\n".join(trimmed) + "\n")
+            content = "\n".join(trimmed) + "\n"
+            fd, tmp_path = tempfile.mkstemp(
+                dir=path.parent, suffix=".tmp", prefix=".engagement_",
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(content)
+                os.replace(tmp_path, path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
             logger.info(
                 "Trimmed engagement log: %d -> %d entries.",
                 len(lines), len(trimmed),
