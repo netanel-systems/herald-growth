@@ -126,7 +126,7 @@ class ReactionEngine:
         path = self.data_dir / "engagement_log.jsonl"
         if not path.exists():
             return
-        lines = [l for l in path.read_text().strip().split("\n") if l.strip()]
+        lines = [line for line in path.read_text().strip().split("\n") if line.strip()]
         if len(lines) > self.config.max_engagement_log:
             trimmed = lines[-self.config.max_engagement_log:]
             content = "\n".join(trimmed) + "\n"
@@ -256,9 +256,10 @@ class ReactionEngine:
                     if rate_limited:
                         remaining = len(candidates[:max_reactions]) - idx - 1
                         logger.warning(
-                            "Rate limited on article %d. Skipping to next (%d articles remaining).",
+                            "Rate limited on article %d. Backing off 5s, then next (%d remaining).",
                             aid, remaining,
                         )
+                        time.sleep(5)
                         continue
                     logger.info("Reaction failed on article %d. Continuing.", aid)
 

@@ -233,7 +233,9 @@ Seven bugs fixed in the `fix/growth-bugs` branch. System state after fixes:
 ### Key Invariant (storage.py)
 
 `reacted.json` and `commented.json` format:
+
 ```json
 {"article_ids": [1, 2, 3], "count": 3}
 ```
+
 `count` is informational. Always use `len(article_ids)` for the actual count.

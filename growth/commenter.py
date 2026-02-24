@@ -250,7 +250,7 @@ class CommentEngine:
         path = self.data_dir / "engagement_log.jsonl"
         if not path.exists():
             return
-        lines = [l for l in path.read_text().strip().split("\n") if l.strip()]
+        lines = [line for line in path.read_text().strip().split("\n") if line.strip()]
         if len(lines) > self.config.max_engagement_log:
             trimmed = lines[-self.config.max_engagement_log:]
             content = "\n".join(trimmed) + "\n"
