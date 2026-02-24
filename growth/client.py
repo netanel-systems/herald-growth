@@ -166,6 +166,13 @@ class DevToClient:
         """
         return self._request("GET", f"/articles/{article_id}")
 
+    # --- Tags ---
+
+    def get_tags(self, page: int = 1, per_page: int = 100) -> list[dict]:
+        """Fetch available tags from dev.to."""
+        params = {"page": page, "per_page": per_page}
+        return self._request("GET", "/tags", params=params)
+
     # --- Reactions ---
 
     def react_to_article(

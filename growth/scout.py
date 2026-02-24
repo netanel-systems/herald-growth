@@ -8,11 +8,41 @@ Filters out articles we already engaged with and our own articles.
 """
 
 import logging
+import random
 
 from growth.client import DevToClient, DevToError
 from growth.config import GrowthConfig
 
 logger = logging.getLogger(__name__)
+
+# Number of random tags to sample from dev.to each cycle
+TAGS_PER_CYCLE = 10
+
+
+def fetch_random_tags(client: DevToClient, sample_size: int = TAGS_PER_CYCLE) -> list[str]:
+    """Fetch all tags from dev.to API and randomly sample.
+
+    Each cycle gets a different random slice of the full tag pool,
+    maximizing article diversity across runs.
+    Falls back to config defaults if API fails.
+    """
+    all_tags: list[str] = []
+    try:
+        for page in range(1, 8):  # ~700 tags max
+            tags = client.get_tags(page=page, per_page=100)
+            if not tags:
+                break
+            all_tags.extend(t.get("name", "") for t in tags if t.get("name"))
+    except DevToError as e:
+        logger.warning("Failed to fetch tags from API: %s. Using defaults.", e)
+        return []
+
+    if not all_tags:
+        return []
+
+    sample = random.sample(all_tags, min(sample_size, len(all_tags)))
+    logger.info("Sampled %d random tags from %d available.", len(sample), len(all_tags))
+    return sample
 
 
 class ArticleScout:
@@ -27,6 +57,17 @@ class ArticleScout:
     def __init__(self, client: DevToClient, config: GrowthConfig) -> None:
         self.client = client
         self.config = config
+        self._cycle_tags: list[str] | None = None
+
+    @property
+    def cycle_tags(self) -> list[str]:
+        """Random tags for this cycle. Fetched once, cached per instance."""
+        if self._cycle_tags is None:
+            self._cycle_tags = fetch_random_tags(self.client)
+            if not self._cycle_tags:
+                self._cycle_tags = self.config.target_tags
+                logger.info("Using %d fallback tags from config.", len(self._cycle_tags))
+        return self._cycle_tags
 
     def find_rising_articles(
         self, tags: list[str] | None = None, count: int = 10,
@@ -36,7 +77,7 @@ class ArticleScout:
         Rising = gaining reactions fast. Authors are engaged.
         Dedupes across tags (same article can appear in multiple tags).
         """
-        tags = tags or self.config.target_tags
+        tags = tags or self.cycle_tags
         seen_ids: set[int] = set()
         results: list[dict] = []
 
@@ -71,7 +112,7 @@ class ArticleScout:
         Fresh articles have the highest chance of the author seeing
         our reaction notification immediately.
         """
-        tags = tags or self.config.target_tags
+        tags = tags or self.cycle_tags
         seen_ids: set[int] = set()
         results: list[dict] = []
 
@@ -101,7 +142,7 @@ class ArticleScout:
 
         Good for commenting — these articles have high visibility.
         """
-        tags = tags or self.config.target_tags
+        tags = tags or self.cycle_tags
         seen_ids: set[int] = set()
         results: list[dict] = []
 

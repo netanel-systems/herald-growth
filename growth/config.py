@@ -13,32 +13,11 @@ from pydantic_settings import BaseSettings
 logger = logging.getLogger(__name__)
 
 # Default tags we monitor for engagement opportunities
+# Tags are fetched live from dev.to API and randomly sampled each cycle.
+# This fallback is only used if the API call fails.
 DEFAULT_TARGET_TAGS: list[str] = [
-    # Core — our domain
-    "ai", "python", "machinelearning", "langchain",
-    "llm", "chatgpt", "datascience", "algorithms",
-    # Web & frontend
-    "webdev", "javascript", "typescript", "react",
-    "nextjs", "vue", "angular", "css", "html", "frontend",
-    # Backend & languages
-    "node", "go", "rust", "java", "csharp", "php",
-    "ruby", "cpp", "django", "laravel",
-    # Ops & infra
-    "devops", "docker", "kubernetes", "cloud",
-    "aws", "azure", "linux", "git", "serverless",
-    "microservices", "cicd", "automation",
-    # Data & storage
-    "database", "sql", "mongodb", "postgres", "graphql", "api",
-    # Community & growth
-    "programming", "beginners", "tutorial", "productivity",
-    "opensource", "career", "discuss", "showdev",
-    "architecture", "testing", "computerscience",
-    "softwareengineering", "coding", "performance",
-    # Mobile & other
-    "mobile", "android", "flutter", "reactnative",
-    # Security & emerging
-    "security", "cybersecurity", "blockchain", "startup",
-    "gamedev", "vscode", "github",
+    "ai", "python", "webdev", "javascript", "programming",
+    "beginners", "devops", "react", "tutorial", "opensource",
 ]
 
 
