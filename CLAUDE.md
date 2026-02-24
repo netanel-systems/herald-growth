@@ -212,3 +212,30 @@ webdev, javascript, devops, productivity, architecture, opensource, career, disc
 | `~/.nathan/teams/herald_growth/UNKNOWNS.md` | Open questions |
 | `~/.nathan/teams/herald_growth/state.json` | Session state |
 | `~/.nathan/teams/herald_growth/knowledge/comment-style-guide.md` | Comment rules |
+
+---
+
+## Bug Fixes Applied (2026-02-23)
+
+Seven bugs fixed in the `fix/growth-bugs` branch. System state after fixes:
+
+| # | File | Bug | Fix |
+|---|------|-----|-----|
+| A | `reactor.py` | Rate limit `break` stopped entire cycle | Changed to `continue`; logs how many articles remain |
+| B | `learner.py` | `get_reaction_count()` returned 0 (read missing `count` field) | Now reads `len(article_ids)` — the actual list length |
+| C | `browser.py` | CAPTCHA `text=` selector invalid in Playwright `locator()` | Moved to `CAPTCHA_TEXT_INDICATORS`; uses `get_by_text()` in detection loop |
+| D | `browser.py` | Drawer hover delay too short (0.5-1.0s) for non-like reactions | Replaced fixed sleep with `wait_for(state="visible", timeout=3000)` + fallback |
+| E | `commenter.py` | Quality gate used substring match — false positives on "totally agree, here's why..." | Regex word boundaries (`\b`); sentence split uses lookbehind `(?<=[.!?])\s+` |
+| F | `commenter.py` | `trim_engagement_log()` called per-comment inside `_log_engagement()` — O(N²) | Removed from `_log_engagement()`; callers must call trim once after full cycle |
+| G | `storage.py` | No docstring explaining `article_ids` vs `count` field semantics | Added clear docstrings to `load_json_ids()` and `save_json_ids()` |
+| H | `storage.py` | Temp file cleanup on `atomic_write_json()` failure was silent | `OSError` during cleanup now logged as warning instead of silently swallowed |
+
+### Key Invariant (storage.py)
+
+`reacted.json` and `commented.json` format:
+
+```json
+{"article_ids": [1, 2, 3], "count": 3}
+```
+
+`count` is informational. Always use `len(article_ids)` for the actual count.

@@ -46,14 +46,15 @@ class GrowthLearner:
             return []
 
     def save_learnings(self, learnings: list[dict]) -> None:
-        """Save learnings to disk, bounded to max_learnings."""
+        """Save learnings to disk, bounded to max_learnings. Uses atomic write."""
+        from growth.storage import atomic_write_json
+
         path = self.data_dir / "learnings.json"
         # Keep most recent if over limit
         if len(learnings) > self.config.max_learnings:
             learnings = learnings[-self.config.max_learnings:]
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(learnings, f, indent=2)
+        atomic_write_json(path, learnings)
         logger.info("Saved %d learnings.", len(learnings))
 
     def store_learning(
@@ -184,7 +185,7 @@ class GrowthLearner:
         try:
             with open(path) as f:
                 data = json.load(f)
-            return data.get("count", 0)
+            return len(data.get("article_ids", []))
         except (json.JSONDecodeError, OSError):
             return 0
 

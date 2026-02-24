@@ -119,14 +119,30 @@ class ReactionEngine:
             f.write(json.dumps(entry) + "\n")
 
     def trim_engagement_log(self) -> None:
-        """Trim engagement log to max_engagement_log entries."""
+        """Trim engagement log to max_engagement_log entries. Atomic write."""
+        import os
+        import tempfile
+
         path = self.data_dir / "engagement_log.jsonl"
         if not path.exists():
             return
-        lines = path.read_text().strip().split("\n")
+        lines = [line for line in path.read_text().strip().split("\n") if line.strip()]
         if len(lines) > self.config.max_engagement_log:
             trimmed = lines[-self.config.max_engagement_log:]
-            path.write_text("\n".join(trimmed) + "\n")
+            content = "\n".join(trimmed) + "\n"
+            fd, tmp_path = tempfile.mkstemp(
+                dir=path.parent, suffix=".tmp", prefix=".engagement_",
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(content)
+                os.replace(tmp_path, path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
             logger.info(
                 "Trimmed engagement log: %d -> %d entries.",
                 len(lines), len(trimmed),
@@ -238,8 +254,13 @@ class ReactionEngine:
                 else:
                     failed_count += 1
                     if rate_limited:
-                        logger.info("Rate limited on article %d. Stopping early.", aid)
-                        break
+                        remaining = len(candidates[:max_reactions]) - idx - 1
+                        logger.warning(
+                            "Rate limited on article %d. Backing off 5s, then next (%d remaining).",
+                            aid, remaining,
+                        )
+                        time.sleep(5)
+                        continue
                     logger.info("Reaction failed on article %d. Continuing.", aid)
 
                 # Delay after every attempt (success or fail) for rate-limit safety

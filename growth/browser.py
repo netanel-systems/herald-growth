@@ -94,13 +94,34 @@ class DevToBrowser:
     SEL_ARTICLE_BODY = "#article-body"
 
     # CAPTCHA / challenge indicators
+    # CSS selectors only — text= syntax does NOT work with locator().
+    # Text-based indicators are handled separately in _detect_captcha().
     CAPTCHA_INDICATORS = (
         "iframe[src*='captcha']",
         "iframe[src*='recaptcha']",
         "#captcha",
         ".g-recaptcha",
         "[data-sitekey]",
-        "text=Please verify you are a human",
+    )
+    CAPTCHA_TEXT_INDICATORS = (
+        "Please verify you are a human",
+    )
+
+    # Reply-to-comment selectors — verified from Forem source:
+    # app/assets/javascripts/utilities/buildCommentHTML.js.erb
+    # app/assets/javascripts/utilities/buildCommentFormHTML.js.erb
+    # All interactions scoped to #comment-node-{id} for precision.
+    SELS_REPLY_BUTTON = (
+        ".toggle-reply-form",
+        "button[data-tracking-name='comment_reply_button']",
+    )
+    SELS_REPLY_TEXTAREA = (
+        "textarea.crayons-textfield.comment-textarea",
+        "textarea.comment-textarea",
+    )
+    SELS_REPLY_SUBMIT = (
+        "button[data-tracking-name='comment_reply_submit_button']",
+        "button[type='submit'].comment-action-button",
     )
 
     VALID_CATEGORIES = ("like", "unicorn", "fire", "raised_hands", "exploding_head")
@@ -143,13 +164,23 @@ class DevToBrowser:
         """Check if current page shows a CAPTCHA or challenge.
 
         Returns True if a challenge is detected, False otherwise.
+        CSS selectors use locator(); text indicators use get_by_text()
+        since text= syntax is not valid in Playwright's locator().
         """
         if self._page is None:
             return False
         for indicator in self.CAPTCHA_INDICATORS:
             try:
-                if self._page.locator(indicator).first.is_visible(timeout=1000):
+                if self._page.locator(indicator).first.is_visible(timeout=500):
                     logger.warning("CAPTCHA/challenge detected: %s", indicator)
+                    self._save_debug_screenshot("captcha_detected")
+                    return True
+            except PlaywrightTimeoutError:
+                continue
+        for text in self.CAPTCHA_TEXT_INDICATORS:
+            try:
+                if self._page.get_by_text(text).first.is_visible(timeout=500):
+                    logger.warning("CAPTCHA detected: %s", text)
                     self._save_debug_screenshot("captcha_detected")
                     return True
             except PlaywrightTimeoutError:
@@ -159,7 +190,21 @@ class DevToBrowser:
     # --- Lifecycle ---
 
     def start(self) -> None:
-        """Launch headless Chromium and create browser context."""
+        """Launch headless Chromium and create browser context.
+
+        Validates credentials are configured before launching browser.
+        Raises BrowserLoginRequired if email/password are missing and
+        no stored session exists.
+        """
+        # Validate credentials early — fail fast, not after launching browser
+        has_session = self._has_stored_session()
+        has_credentials = bool(self.config.devto_email and self.config.devto_password)
+        if not has_session and not has_credentials:
+            raise BrowserLoginRequired(
+                "No stored session and no credentials configured. "
+                "Set GROWTH_DEVTO_EMAIL and GROWTH_DEVTO_PASSWORD in .env"
+            )
+
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(
             headless=self.config.browser_headless,
@@ -214,25 +259,78 @@ class DevToBrowser:
     # --- Authentication ---
 
     def _has_stored_session(self) -> bool:
-        """Check if browser_state.json exists and has cookies."""
+        """Check if browser_state.json exists and has non-expired cookies.
+
+        Proactively checks cookie expiration timestamps to avoid loading
+        stale sessions that will fail immediately (H1 fix).
+        """
         if not self._storage_path.exists():
             return False
         try:
             data = json.loads(self._storage_path.read_text())
-            return bool(data.get("cookies"))
+            cookies = data.get("cookies", [])
+            if not cookies:
+                return False
+
+            # Check if key session cookies are expired
+            now = time.time()
+            session_cookies = [
+                c for c in cookies
+                if "devto" in c.get("name", "").lower()
+                or "forem" in c.get("name", "").lower()
+                or "_session" in c.get("name", "").lower()
+                or "remember" in c.get("name", "").lower()
+            ]
+
+            if session_cookies:
+                for cookie in session_cookies:
+                    expires = cookie.get("expires", -1)
+                    # expires=-1 means session cookie (valid until browser close)
+                    # expires=0 or past timestamp means expired
+                    if expires > 0 and expires < now:
+                        logger.warning(
+                            "Session cookie '%s' expired at %s. Clearing stale session.",
+                            cookie.get("name", "?"),
+                            time.strftime("%Y-%m-%d %H:%M", time.localtime(expires)),
+                        )
+                        return False
+
+            return True
         except (json.JSONDecodeError, OSError):
             return False
 
+    # Fallback selectors for logged-in detection (meta tag may not exist on all pages)
+    SELS_LOGGED_IN_FALLBACK = (
+        'meta[name="user-signed-in"][content="true"]',
+        'a[href="/new"]',              # "Create Post" link (only visible when logged in)
+        'button[aria-label="Navigation menu"]',  # Mobile nav (logged-in)
+        'a[href="/notifications"]',    # Notifications bell
+        'img.crayons-avatar',          # User avatar in nav
+    )
+
     def _is_logged_in(self) -> bool:
-        """Check if current page shows logged-in state."""
+        """Check if current page shows logged-in state.
+
+        Uses multiple fallback indicators since the meta tag may not
+        exist on all page types (modals, redirects, etc).
+        """
         if self._page is None:
             return False
         try:
             current_url = self._page.url
             if not current_url.startswith(self.BASE_URL):
                 self._page.goto(self.BASE_URL, wait_until="domcontentloaded")
-            meta = self._page.query_selector(self.SEL_LOGGED_IN)
-            return meta is not None
+
+            # Try each indicator — any one match means logged in
+            for selector in self.SELS_LOGGED_IN_FALLBACK:
+                try:
+                    el = self._page.query_selector(selector)
+                    if el is not None:
+                        return True
+                except Exception:
+                    continue
+
+            return False
         except PlaywrightTimeoutError:
             return False
 
@@ -258,6 +356,13 @@ class DevToBrowser:
         try:
             self._page.goto(self.LOGIN_URL, wait_until="domcontentloaded")
             self._human_delay(1.0, 2.0)
+
+            # dev.to redirects to homepage if session is still valid.
+            # Check if we're already logged in after the redirect.
+            if self._is_logged_in():
+                logger.info("Already logged in (redirect from login page). Session valid.")
+                self._save_session()
+                return True
 
             # Check for CAPTCHA before interacting
             if self._detect_captcha():
@@ -288,7 +393,7 @@ class DevToBrowser:
                 logger.error("Login submit button not found (all selectors failed).")
                 return False
             submit_btn.click()
-            self._page.wait_for_load_state("networkidle")
+            self._page.wait_for_load_state("domcontentloaded")
             self._human_delay(1.0, 2.0)
 
             # Check for CAPTCHA after submit (challenge may appear post-submit)
@@ -372,7 +477,7 @@ class DevToBrowser:
                 logger.error("Browser page not initialized for reaction.")
                 return False, False
 
-            self._page.goto(article_url, wait_until="networkidle")
+            self._page.goto(article_url, wait_until="domcontentloaded")
             self._human_delay(1.5, 3.0)
 
             # The sidebar heart icon is #reaction-drawer-trigger.
@@ -410,11 +515,16 @@ class DevToBrowser:
                     return True, False
             else:
                 # Non-like: hover drawer trigger to reveal all reaction buttons
+                selector = self.SEL_REACTION_BUTTON.format(category=category)
                 drawer_trigger.hover()
-                self._human_delay(0.5, 1.0)
+                # Wait for drawer to animate open — fixed sleep is too short on slow connections
+                try:
+                    self._page.locator(selector).wait_for(state="visible", timeout=3000)
+                except Exception:
+                    # Fallback: fixed delay if wait_for times out
+                    self._human_delay(1.5, 2.5)
 
                 # Find the specific reaction button inside the drawer
-                selector = self.SEL_REACTION_BUTTON.format(category=category)
                 button = self._page.locator(selector)
 
                 if not button.is_visible():
@@ -537,15 +647,15 @@ class DevToBrowser:
             submit_btn.click()
 
             # Wait for submission
-            self._page.wait_for_load_state("networkidle")
+            self._page.wait_for_load_state("domcontentloaded")
             self._human_delay(1.0, 2.0)
 
             # Verify: check if our comment text appears on the page
             posted = False
             try:
-                self._page.locator(
-                    f"text={body_markdown[:40]}"
-                ).wait_for(timeout=5000)
+                self._page.get_by_text(
+                    body_markdown[:40], exact=False,
+                ).first.wait_for(timeout=5000)
                 posted = True
             except PlaywrightTimeoutError:
                 # Fallback: check if textarea was cleared
@@ -579,6 +689,186 @@ class DevToBrowser:
             logger.error(
                 "Unexpected browser error commenting on %d: %s",
                 article_id, exc,
+            )
+            return None
+
+    def reply_to_comment(
+        self,
+        comment_id: int,
+        body_markdown: str,
+        article_url: str = "",
+    ) -> dict | None:
+        """Reply to an existing comment thread via the web form.
+
+        Scopes all interactions to the specific comment container
+        (#comment-node-{comment_id}) to avoid filling the wrong form.
+
+        Args:
+            comment_id: Numeric ID of the parent comment to reply to.
+            body_markdown: Markdown text of the reply.
+            article_url: Full article URL (required).
+
+        Returns:
+            Synthetic result dict on success, None on failure.
+        """
+        # RID-001: Validate comment_id before constructing CSS selectors.
+        # Python type hints are not enforced at runtime; callers may pass strings
+        # containing CSS special characters (e.g. >, ], whitespace) that would
+        # cause locator() to silently select wrong DOM elements.
+        if not isinstance(comment_id, int) or comment_id <= 0:
+            logger.warning("Invalid comment_id for reply: %s", comment_id)
+            return None
+
+        if not article_url:
+            logger.warning("No article URL for reply to comment %d.", comment_id)
+            return None
+
+        try:
+            self.ensure_logged_in()
+            if self._page is None:
+                logger.error("Browser page not initialized for reply.")
+                return None
+
+            self._page.goto(article_url, wait_until="domcontentloaded")
+            self._human_delay(1.0, 2.0)
+
+            # Scope all interactions to the specific comment container
+            container_sel = f"#comment-node-{comment_id}"
+            try:
+                container = self._page.locator(container_sel).first
+                container.wait_for(state="visible", timeout=5000)
+            except PlaywrightTimeoutError:
+                self._save_debug_screenshot(
+                    f"reply_container_not_found_{comment_id}"
+                )
+                logger.warning("Comment node #%d not found on page.", comment_id)
+                return None
+
+            # Click the reply button within the comment container
+            reply_btn = None
+            for sel in self.SELS_REPLY_BUTTON:
+                loc = container.locator(sel).first
+                try:
+                    if loc.is_visible(timeout=2000):
+                        reply_btn = loc
+                        break
+                except PlaywrightTimeoutError:
+                    continue
+
+            if reply_btn is None:
+                self._save_debug_screenshot(
+                    f"reply_button_not_found_{comment_id}"
+                )
+                logger.warning("Reply button not found for comment %d.", comment_id)
+                return None
+
+            reply_btn.click()
+            self._human_delay(0.5, 1.0)
+
+            # Find the reply textarea — prefer ID-scoped selector (#textarea-for-{id})
+            # for precision over class-based fallbacks, since each comment has a unique
+            # textarea ID. Timeout standardized to 2000ms across all selector attempts.
+            textarea = None
+            id_sel = f"textarea#textarea-for-{comment_id}"
+            try:
+                loc = self._page.locator(id_sel).first
+                if loc.is_visible(timeout=2000):
+                    textarea = loc
+                    logger.debug("Reply textarea found via ID selector for comment %d.", comment_id)
+            except PlaywrightTimeoutError:
+                pass
+
+            if textarea is None:
+                for sel in self.SELS_REPLY_TEXTAREA:
+                    loc = container.locator(sel).first
+                    try:
+                        if loc.is_visible(timeout=2000):
+                            textarea = loc
+                            logger.debug("Reply textarea found via fallback selector '%s'.", sel)
+                            break
+                    except PlaywrightTimeoutError:
+                        continue
+
+            if textarea is None:
+                self._save_debug_screenshot(
+                    f"reply_textarea_not_found_{comment_id}"
+                )
+                logger.warning(
+                    "Reply textarea not found for comment %d.", comment_id
+                )
+                return None
+
+            textarea.click()
+            self._human_delay(0.3, 0.6)
+            textarea.fill(body_markdown)
+            self._human_delay(0.5, 1.5)
+
+            # Find and click the submit button within the comment container
+            submit_btn = None
+            for sel in self.SELS_REPLY_SUBMIT:
+                loc = container.locator(sel).first
+                try:
+                    if loc.is_visible(timeout=2000):
+                        submit_btn = loc
+                        break
+                except PlaywrightTimeoutError:
+                    continue
+
+            if submit_btn is None:
+                self._save_debug_screenshot(
+                    f"reply_submit_not_found_{comment_id}"
+                )
+                logger.warning(
+                    "Reply submit button not found for comment %d.", comment_id
+                )
+                return None
+
+            submit_btn.click()
+            self._page.wait_for_load_state("domcontentloaded")
+            self._human_delay(1.0, 2.0)
+
+            # Verify reply posted — mirrors the verification pattern in post_comment().
+            # Primary: wait for the reply text to appear on the page (high confidence).
+            # Fallback: if the page renders slowly, check whether Forem cleared the
+            # textarea after submit (standard Forem behaviour on success). Either path
+            # indicates the form was submitted successfully.
+            posted = False
+            try:
+                self._page.get_by_text(
+                    body_markdown[:40], exact=False,
+                ).first.wait_for(timeout=5000)
+                posted = True
+            except PlaywrightTimeoutError:
+                textarea_val = textarea.input_value()
+                posted = textarea_val.strip() == ""
+
+            if posted:
+                logger.info(
+                    "Reply posted to comment %d via browser (%d chars).",
+                    comment_id, len(body_markdown),
+                )
+                self._save_session()
+                return {
+                    "status": "replied",
+                    "comment_id": comment_id,
+                    "source": "browser",
+                }
+
+            logger.warning("Reply may not have posted to comment %d.", comment_id)
+            self._save_debug_screenshot(f"reply_failed_{comment_id}")
+            return None
+
+        except BrowserLoginRequired:
+            logger.error("Cannot reply — login required.")
+            return None
+        except PlaywrightTimeoutError:
+            logger.warning("Reply to comment %d timed out.", comment_id)
+            self._save_debug_screenshot(f"reply_timeout_{comment_id}")
+            return None
+        except Exception as exc:
+            logger.error(
+                "Unexpected browser error replying to comment %d: %s",
+                comment_id, exc,
             )
             return None
 
