@@ -711,6 +711,14 @@ class DevToBrowser:
         Returns:
             Synthetic result dict on success, None on failure.
         """
+        # RID-001: Validate comment_id before constructing CSS selectors.
+        # Python type hints are not enforced at runtime; callers may pass strings
+        # containing CSS special characters (e.g. >, ], whitespace) that would
+        # cause locator() to silently select wrong DOM elements.
+        if not isinstance(comment_id, int) or comment_id <= 0:
+            logger.warning("Invalid comment_id for reply: %s", comment_id)
+            return None
+
         if not article_url:
             logger.warning("No article URL for reply to comment %d.", comment_id)
             return None
@@ -757,13 +765,16 @@ class DevToBrowser:
             reply_btn.click()
             self._human_delay(0.5, 1.0)
 
-            # Find the reply textarea — prefer ID-scoped selector for precision
+            # Find the reply textarea — prefer ID-scoped selector (#textarea-for-{id})
+            # for precision over class-based fallbacks, since each comment has a unique
+            # textarea ID. Timeout standardized to 2000ms across all selector attempts.
             textarea = None
             id_sel = f"textarea#textarea-for-{comment_id}"
             try:
                 loc = self._page.locator(id_sel).first
-                if loc.is_visible(timeout=3000):
+                if loc.is_visible(timeout=2000):
                     textarea = loc
+                    logger.debug("Reply textarea found via ID selector for comment %d.", comment_id)
             except PlaywrightTimeoutError:
                 pass
 
@@ -773,6 +784,7 @@ class DevToBrowser:
                     try:
                         if loc.is_visible(timeout=2000):
                             textarea = loc
+                            logger.debug("Reply textarea found via fallback selector '%s'.", sel)
                             break
                     except PlaywrightTimeoutError:
                         continue
@@ -815,7 +827,11 @@ class DevToBrowser:
             self._page.wait_for_load_state("domcontentloaded")
             self._human_delay(1.0, 2.0)
 
-            # Verify reply posted — same verification pattern as post_comment
+            # Verify reply posted — mirrors the verification pattern in post_comment().
+            # Primary: wait for the reply text to appear on the page (high confidence).
+            # Fallback: if the page renders slowly, check whether Forem cleared the
+            # textarea after submit (standard Forem behaviour on success). Either path
+            # indicates the form was submitted successfully.
             posted = False
             try:
                 self._page.get_by_text(

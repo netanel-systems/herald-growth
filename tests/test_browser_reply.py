@@ -146,7 +146,45 @@ def test_successful_reply_returns_dict(browser: DevToBrowser) -> None:
     assert result["source"] == "browser"
 
 
-# ── Test 6: BrowserLoginRequired → None ──────────────────────────
+# ── Test 6: Invalid comment_id guard ────────────────────────────
+
+def test_invalid_comment_id_returns_none(browser: DevToBrowser) -> None:
+    """Non-positive or non-integer comment_id returns None immediately."""
+    assert browser.reply_to_comment(0, "Nice!", "https://dev.to/a/b") is None
+    assert browser.reply_to_comment(-1, "Nice!", "https://dev.to/a/b") is None
+    # Type hint is not enforced at runtime — callers may pass strings
+    assert browser.reply_to_comment("123", "Nice!", "https://dev.to/a/b") is None  # type: ignore[arg-type]
+    browser._page.goto.assert_not_called()
+
+
+# ── Test 7: Submit button not found ──────────────────────────────
+
+def test_submit_button_not_found_returns_none(browser: DevToBrowser) -> None:
+    """If submit button not found after filling textarea, returns None."""
+    with patch.object(browser, "ensure_logged_in"):
+        container = _locator(visible=True)
+        reply_btn = _locator(visible=True)
+        textarea = _locator(visible=True, value="")
+        no_submit = _locator(visible=False)
+
+        def container_loc(sel: str) -> MagicMock:
+            if "toggle-reply-form" in sel or "reply_button" in sel:
+                return reply_btn
+            if "textarea" in sel:
+                return textarea
+            if "submit" in sel or "comment-action-button" in sel:
+                return no_submit
+            return _locator(visible=False)
+
+        container.locator.side_effect = container_loc
+        browser._page.locator.return_value = container
+
+        result = browser.reply_to_comment(123, "Nice!", "https://dev.to/a/b")
+
+    assert result is None
+
+
+# ── Test 8: BrowserLoginRequired → None ──────────────────────────
 
 def test_login_required_returns_none(browser: DevToBrowser) -> None:
     """BrowserLoginRequired from ensure_logged_in() returns None."""
@@ -158,7 +196,7 @@ def test_login_required_returns_none(browser: DevToBrowser) -> None:
     assert result is None
 
 
-# ── Test 7: PlaywrightTimeoutError during navigation → None ───────
+# ── Test 9: PlaywrightTimeoutError during navigation → None ───────
 
 def test_playwright_timeout_returns_none(browser: DevToBrowser) -> None:
     """PlaywrightTimeoutError during page.goto() returns None gracefully."""
