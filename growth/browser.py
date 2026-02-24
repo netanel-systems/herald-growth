@@ -312,8 +312,11 @@ class DevToBrowser:
     def ensure_logged_in(self) -> None:
         """Verify session is active. Re-login if expired.
 
-        Raises BrowserLoginRequired if no credentials configured
-        and session is expired.
+        Supports two login methods:
+        1. Saved session cookies (from manual Google OAuth login via login_once.py)
+        2. Email/password auto-login (if credentials configured in .env)
+
+        Raises BrowserLoginRequired if session expired and no way to re-login.
         """
         if self._is_logged_in():
             return
@@ -325,12 +328,14 @@ class DevToBrowser:
         if not email or not password:
             raise BrowserLoginRequired(
                 "Browser session expired and no credentials configured. "
-                "Set GROWTH_DEVTO_EMAIL and GROWTH_DEVTO_PASSWORD in .env."
+                "Run 'python login_once.py' to log in with Google and save cookies, "
+                "or set GROWTH_DEVTO_EMAIL and GROWTH_DEVTO_PASSWORD in .env."
             )
 
         if not self.login(email, password):
             raise BrowserLoginRequired(
-                "Auto re-login failed. Check credentials or login manually."
+                "Auto re-login failed. Check credentials or "
+                "run 'python login_once.py' to log in manually."
             )
 
     # --- Write Operations ---
