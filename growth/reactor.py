@@ -14,6 +14,7 @@ Usage:
 import json
 import logging
 import random
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -34,6 +35,36 @@ REACTION_WEIGHTS: list[tuple[str, int]] = [
     ("raised_hands", 15),
     ("exploding_head", 10),
 ]
+
+
+def _notify_session_expired(data_dir: Path) -> None:
+    """Alert Klement that browser session expired and needs re-login.
+
+    Creates an alert file + sends desktop notification.
+    """
+    alert_path = data_dir / "SESSION_EXPIRED"
+    alert_path.parent.mkdir(parents=True, exist_ok=True)
+    alert_path.write_text(
+        f"Session expired at {datetime.now(timezone.utc).isoformat()}\n"
+        "Run: cd ~/netanel/teams/herald_growth && python login_once.py\n"
+    )
+    logger.error(
+        "SESSION EXPIRED — Run 'python login_once.py' to re-authenticate."
+    )
+    # Desktop notification (non-blocking, best-effort)
+    try:
+        subprocess.Popen(
+            [
+                "notify-send",
+                "--urgency=critical",
+                "Herald Growth: Session Expired",
+                "Run 'python login_once.py' to re-login to dev.to",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        pass  # notify-send not available
 
 
 def pick_reaction_category() -> str:
@@ -227,6 +258,7 @@ class ReactionEngine:
 
         except BrowserLoginRequired as exc:
             logger.exception("Browser login required — cycle aborted: %s", exc)
+            _notify_session_expired(self.data_dir)
             return {"error": str(exc), "elapsed_seconds": round(time.time() - start, 1)}
         except BrowserError as exc:
             logger.exception("Browser error — cycle aborted: %s", exc)
