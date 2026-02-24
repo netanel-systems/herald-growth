@@ -170,42 +170,39 @@ class ReactionEngine:
         try:
             reacted_ids = self.load_reacted_ids()
             commented_ids = self.load_commented_ids()
+            max_reactions = min(self.config.max_reactions_per_run, 20)
 
-            # Find articles: mix of rising + fresh
-            rising = self.scout.find_rising_articles(count=self.config.max_reactions_per_run)
-            fresh = self.scout.find_fresh_articles(count=self.config.max_reactions_per_run)
-
-            # Merge, dedupe, filter
+            # Keep sampling random tags until we have enough new articles
             seen_ids: set[int] = set()
             candidates: list[dict] = []
-            for article in rising + fresh:
-                aid = article.get("id")
-                if aid and aid not in seen_ids:
-                    seen_ids.add(aid)
-                    candidates.append(article)
+            max_attempts = 5  # cap retries to avoid infinite loop
 
-            candidates = self.scout.filter_own_articles(candidates)
-            candidates = self.scout.filter_already_engaged(
-                candidates, reacted_ids, commented_ids,
-            )
+            for attempt in range(max_attempts):
+                # Each attempt gets fresh random tags via scout.cycle_tags
+                if attempt > 0:
+                    self.scout._cycle_tags = None  # force new random sample
 
-            # Only proceed if we have enough NEW articles (worth opening browser)
-            max_reactions = min(self.config.max_reactions_per_run, 20)
-            if len(candidates) < max_reactions:
-                elapsed = time.time() - start
-                logger.info(
-                    "Only %d new candidates (need %d). Skipping cycle. %.1fs",
-                    len(candidates), max_reactions, elapsed,
+                rising = self.scout.find_rising_articles(count=max_reactions)
+                fresh = self.scout.find_fresh_articles(count=max_reactions)
+
+                for article in rising + fresh:
+                    aid = article.get("id")
+                    if aid and aid not in seen_ids:
+                        seen_ids.add(aid)
+                        candidates.append(article)
+
+                candidates = self.scout.filter_own_articles(candidates)
+                candidates = self.scout.filter_already_engaged(
+                    candidates, reacted_ids, commented_ids,
                 )
-                return {
-                    "reacted": 0,
-                    "skipped": len(candidates),
-                    "failed": 0,
-                    "candidates": len(candidates),
-                    "method": "skipped",
-                    "reason": f"only {len(candidates)} new (need {max_reactions})",
-                    "elapsed_seconds": round(elapsed, 1),
-                }
+
+                if len(candidates) >= max_reactions:
+                    break
+
+                logger.info(
+                    "Attempt %d: %d candidates (need %d). Sampling new tags...",
+                    attempt + 1, len(candidates), max_reactions,
+                )
             reacted_count = 0
             skipped_count = 0
             failed_count = 0
