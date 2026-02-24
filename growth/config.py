@@ -14,10 +14,21 @@ logger = logging.getLogger(__name__)
 
 # Default tags we monitor for engagement opportunities
 DEFAULT_TARGET_TAGS: list[str] = [
+    # Core — our domain
     "ai", "python", "machinelearning", "langchain",
+    "llm", "agents", "genai", "deeplearning",
+    # Dev general
     "programming", "beginners", "tutorial", "webdev",
-    "javascript", "devops", "productivity", "architecture",
-    "opensource", "career", "discuss",
+    "javascript", "typescript", "react", "nextjs",
+    # Ops & infra
+    "devops", "docker", "kubernetes", "cloud",
+    "aws", "linux", "git", "cicd",
+    # Community & growth
+    "opensource", "career", "discuss", "productivity",
+    "architecture", "testing", "database", "api",
+    # Trending niches
+    "rust", "golang", "node", "fastapi",
+    "security", "blockchain", "datascience", "computerscience",
 ]
 
 
