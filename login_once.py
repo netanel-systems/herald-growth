@@ -18,14 +18,43 @@ from growth.browser import DevToBrowser
 from growth.config import load_config
 
 
+def _check_logged_in_no_redirect(browser: DevToBrowser) -> bool:
+    """Check login state WITHOUT navigating away from current page.
+
+    During OAuth flow, the browser is on accounts.google.com.
+    We must NOT redirect it back to dev.to — that breaks the flow.
+    Only check login meta tag when already on dev.to.
+    """
+    if browser._page is None:
+        return False
+    try:
+        current_url = browser._page.url
+        # Still on Google/other OAuth provider — don't touch it
+        if not current_url.startswith("https://dev.to"):
+            return False
+        # Back on dev.to — check the logged-in meta tag
+        meta = browser._page.query_selector(browser.SEL_LOGGED_IN)
+        return meta is not None
+    except Exception:
+        return False
+
+
 def main() -> None:
     config = load_config()
 
     # Force visible browser for manual login
     config.browser_headless = False
 
-    print("Opening dev.to login page in a visible browser...")
-    print("Log in with Google. The script will detect when you're logged in.")
+    print("=" * 50)
+    print("  dev.to — One-Time Login")
+    print("=" * 50)
+    print()
+    print("A browser window will open to dev.to/enter.")
+    print("Log in with Google (or email). The script will")
+    print("detect when you're done and save the session.")
+    print()
+    print("DO NOT close the browser — the script will close it.")
+    print("Press Ctrl+C to cancel at any time.")
     print()
 
     browser = DevToBrowser(config)
@@ -35,25 +64,28 @@ def main() -> None:
         browser._page.goto("https://dev.to/enter", wait_until="domcontentloaded")
 
         print("Waiting for you to log in...")
-        print("(checking every 3 seconds)")
+        print("(checking every 3 seconds, won't interrupt OAuth flow)")
         print()
 
         for attempt in range(120):  # 6 minutes max
             time.sleep(3)
-            if browser._is_logged_in():
+
+            if _check_logged_in_no_redirect(browser):
                 browser._save_session()
                 print()
                 print("Login successful! Session saved.")
                 print(f"Cookies saved to: {browser._storage_path}")
                 print()
-                print("You can now close this and run the reactor:")
+                print("You can now run the reactor:")
                 print("  python -m growth.reactor")
                 print()
                 print("All future headless runs will use these cookies.")
                 return
 
             if attempt % 10 == 0 and attempt > 0:
-                print(f"  Still waiting... ({attempt * 3}s elapsed)")
+                url = browser._page.url if browser._page else "unknown"
+                domain = url.split("/")[2] if url.startswith("http") else url
+                print(f"  Still waiting... ({attempt * 3}s, on {domain})")
 
         print()
         print("Timed out after 6 minutes. Try again: python login_once.py")
