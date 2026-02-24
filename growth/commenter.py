@@ -19,6 +19,7 @@ from pathlib import Path
 from growth.browser import DevToBrowser
 from growth.client import DevToClient, DevToError
 from growth.config import GrowthConfig
+from growth.learner import GrowthLearner
 from growth.storage import load_json_ids, save_json_ids
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,50 @@ class CommentEngine:
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load comment_history.jsonl: %s", e)
         return entries
+
+    def get_learnings_context(self, max_learnings: int = 5) -> list[str]:
+        """Return top learnings as bullet-point strings for LLM prompt injection.
+
+        Callers (e.g. nathan-team comment scripts) should inject the returned
+        list into their system or user prompt so the LLM writes comments that
+        reflect what has historically worked well.
+
+        Safe: any exception from the learner returns an empty list so the
+        comment cycle continues unaffected.
+
+        Returns:
+            list[str]: each item is a bullet-point learning string,
+                       e.g. ["- tag 'python' yields high engagement (confidence: 0.85)"].
+                       Empty list if no learnings or on any error.
+        """
+        try:
+            learner = GrowthLearner(self.config)
+            insights = learner.get_insights_for_prompt(max_insights=max_learnings)
+            if insights:
+                logger.info("Learner context: %d insights for prompt.", len(insights))
+            return insights
+        except Exception:
+            logger.exception("GrowthLearner.get_insights_for_prompt() raised — no context injected.")
+            return []
+
+    def run_learner_analyze(self) -> None:
+        """Run GrowthLearner.analyze() after a comment cycle completes.
+
+        Callers should invoke this once after all comments in a cycle are posted
+        so that engagement patterns are extracted and stored for future cycles.
+
+        Safe: any exception is logged and silently swallowed so the
+        cycle result is never affected by learner errors.
+        """
+        try:
+            learner = GrowthLearner(self.config)
+            new_learnings = learner.analyze()
+            logger.info(
+                "GrowthLearner.analyze() complete: %d new learnings after comment cycle.",
+                len(new_learnings),
+            )
+        except Exception:
+            logger.exception("GrowthLearner.analyze() raised after comment cycle — continuing.")
 
     def post_comment(
         self,

@@ -226,6 +226,65 @@ class GrowthLearner:
                 return learning.get("confidence", 0) >= 0.7
         return False
 
+    def analyze(self) -> list[dict]:
+        """Analyze engagement_log.jsonl and store discovered patterns.
+
+        Reads tag-level engagement counts and stores learnings for tags
+        that show consistently high or zero engagement. Learnings feed
+        back into should_skip_tag() and get_insights_for_prompt().
+
+        Returns the list of new learnings added this run.
+        """
+        tag_stats = self.get_engagement_by_tag()
+        if not tag_stats:
+            logger.info("analyze(): no engagement data yet. Skipping.")
+            return []
+
+        new_learnings: list[dict] = []
+
+        # Threshold: tags with zero total engagement across sufficient data
+        # are candidates to skip. Require at least 5 data points to be confident.
+        MIN_EVENTS_FOR_SIGNAL = 5
+        HIGH_ENGAGEMENT_THRESHOLD = 10
+
+        for tag, stats in tag_stats.items():
+            total = stats.get("total", 0)
+            reactions = stats.get("reactions", 0)
+            comments = stats.get("comments", 0)
+
+            if total < MIN_EVENTS_FOR_SIGNAL:
+                continue  # Not enough data to draw conclusions
+
+            if total == 0 or (reactions == 0 and comments == 0):
+                pattern = f"skip tag '{tag}' — zero reciprocity across {total} events"
+                confidence = min(0.9, 0.7 + total * 0.01)
+                self.store_learning(
+                    pattern=pattern,
+                    confidence=confidence,
+                    evidence=f"tag={tag} reactions={reactions} comments={comments} total={total}",
+                )
+                new_learnings.append({"tag": tag, "action": "skip", "confidence": confidence})
+                logger.info("analyze(): stored skip-learning for tag '%s'", tag)
+
+            elif total >= HIGH_ENGAGEMENT_THRESHOLD:
+                ratio = (reactions + comments) / total
+                if ratio >= 0.8:
+                    pattern = f"tag '{tag}' yields high engagement — prioritize"
+                    confidence = min(0.95, 0.6 + ratio * 0.3)
+                    self.store_learning(
+                        pattern=pattern,
+                        confidence=confidence,
+                        evidence=f"tag={tag} reactions={reactions} comments={comments} total={total} ratio={ratio:.2f}",
+                    )
+                    new_learnings.append({"tag": tag, "action": "prioritize", "confidence": confidence})
+                    logger.info("analyze(): stored prioritize-learning for tag '%s'", tag)
+
+        logger.info(
+            "analyze(): complete. %d new learnings from %d tags.",
+            len(new_learnings), len(tag_stats),
+        )
+        return new_learnings
+
     def generate_weekly_summary(self) -> dict:
         """Generate a comprehensive weekly summary.
 
