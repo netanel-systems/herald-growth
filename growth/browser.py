@@ -94,13 +94,17 @@ class DevToBrowser:
     SEL_ARTICLE_BODY = "#article-body"
 
     # CAPTCHA / challenge indicators
+    # CSS selectors only — text= syntax does NOT work with locator().
+    # Text-based indicators are handled separately in _detect_captcha().
     CAPTCHA_INDICATORS = (
         "iframe[src*='captcha']",
         "iframe[src*='recaptcha']",
         "#captcha",
         ".g-recaptcha",
         "[data-sitekey]",
-        "text=Please verify you are a human",
+    )
+    CAPTCHA_TEXT_INDICATORS = (
+        "Please verify you are a human",
     )
 
     VALID_CATEGORIES = ("like", "unicorn", "fire", "raised_hands", "exploding_head")
@@ -143,13 +147,23 @@ class DevToBrowser:
         """Check if current page shows a CAPTCHA or challenge.
 
         Returns True if a challenge is detected, False otherwise.
+        CSS selectors use locator(); text indicators use get_by_text()
+        since text= syntax is not valid in Playwright's locator().
         """
         if self._page is None:
             return False
         for indicator in self.CAPTCHA_INDICATORS:
             try:
-                if self._page.locator(indicator).first.is_visible(timeout=1000):
+                if self._page.locator(indicator).first.is_visible(timeout=500):
                     logger.warning("CAPTCHA/challenge detected: %s", indicator)
+                    self._save_debug_screenshot("captcha_detected")
+                    return True
+            except PlaywrightTimeoutError:
+                continue
+        for text in self.CAPTCHA_TEXT_INDICATORS:
+            try:
+                if self._page.get_by_text(text).first.is_visible(timeout=500):
+                    logger.warning("CAPTCHA detected: %s", text)
                     self._save_debug_screenshot("captcha_detected")
                     return True
             except PlaywrightTimeoutError:
@@ -484,11 +498,16 @@ class DevToBrowser:
                     return True, False
             else:
                 # Non-like: hover drawer trigger to reveal all reaction buttons
+                selector = self.SEL_REACTION_BUTTON.format(category=category)
                 drawer_trigger.hover()
-                self._human_delay(0.5, 1.0)
+                # Wait for drawer to animate open — fixed sleep is too short on slow connections
+                try:
+                    self._page.locator(selector).wait_for(state="visible", timeout=3000)
+                except Exception:
+                    # Fallback: fixed delay if wait_for times out
+                    self._human_delay(1.5, 2.5)
 
                 # Find the specific reaction button inside the drawer
-                selector = self.SEL_REACTION_BUTTON.format(category=category)
                 button = self._page.locator(selector)
 
                 if not button.is_visible():

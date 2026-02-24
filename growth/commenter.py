@@ -156,7 +156,8 @@ class CommentEngine:
             return False
 
         # Must be 1-2 sentences
-        sentences = [s for s in re.split(r"[.!?]+", body) if s.strip()]
+        # Use lookbehind to avoid splitting on abbreviations (e.g. "Dr. Smith")
+        sentences = [s for s in re.split(r'(?<=[.!?])\s+', body) if s.strip()]
         if not (1 <= len(sentences) <= 2):
             logger.warning("Comment must be 1-2 sentences (found %d).", len(sentences))
             return False
@@ -175,7 +176,8 @@ class CommentEngine:
         ]
         body_lower = body.lower()
         for phrase in generic_phrases:
-            if phrase in body_lower:
+            pattern = r'\b' + re.escape(phrase) + r'\b'
+            if re.search(pattern, body_lower):
                 logger.warning("Generic phrase detected: '%s'", phrase)
                 return False
 
@@ -233,8 +235,9 @@ class CommentEngine:
         }
         with open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
-        # Periodic trim after each write to prevent unbounded growth
-        self.trim_engagement_log()
+        # NOTE: Do NOT trim here — trim is O(N) and should be called once per cycle,
+        # not per comment (which would be O(N²)). Call trim_engagement_log() once
+        # after all comments in a cycle are posted.
 
     def trim_engagement_log(self) -> None:
         """Trim engagement log to max_engagement_log entries. Atomic write.

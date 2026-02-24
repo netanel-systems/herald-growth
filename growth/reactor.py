@@ -254,8 +254,12 @@ class ReactionEngine:
                 else:
                     failed_count += 1
                     if rate_limited:
-                        logger.info("Rate limited on article %d. Stopping early.", aid)
-                        break
+                        remaining = len(candidates[:max_reactions]) - idx - 1
+                        logger.warning(
+                            "Rate limited on article %d. Skipping to next (%d articles remaining).",
+                            aid, remaining,
+                        )
+                        continue
                     logger.info("Reaction failed on article %d. Continuing.", aid)
 
                 # Delay after every attempt (success or fail) for rate-limit safety

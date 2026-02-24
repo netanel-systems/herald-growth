@@ -185,7 +185,7 @@ class GrowthLearner:
         try:
             with open(path) as f:
                 data = json.load(f)
-            return data.get("count", 0)
+            return len(data.get("article_ids", []))
         except (json.JSONDecodeError, OSError):
             return 0
 

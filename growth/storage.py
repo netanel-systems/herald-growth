@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 def load_json_ids(path: Path, key: str = "article_ids") -> set[int]:
     """Load a set of IDs from a JSON file.
 
+    Expected JSON format::
+
+        {"article_ids": [1, 2, 3, ...], "count": N}
+
+    The ``article_ids`` list is the source of truth. The ``count`` field
+    is informational only — always derive counts from ``len(article_ids)``.
     Returns empty set if file doesn't exist or is corrupted.
     """
     if not path.exists():
@@ -36,6 +42,8 @@ def atomic_write_json(path: Path, data: object) -> None:
     """Write JSON data atomically using temp file + rename.
 
     Prevents data corruption if the process crashes mid-write.
+    The temp file is always cleaned up — even if os.replace() fails —
+    to avoid orphaned temp files accumulating in the data directory.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
@@ -48,8 +56,11 @@ def atomic_write_json(path: Path, data: object) -> None:
     except Exception:
         try:
             os.unlink(tmp_path)
-        except OSError:
-            pass
+        except OSError as cleanup_err:
+            logger.warning(
+                "Failed to clean up temp file %s after write error: %s",
+                tmp_path, cleanup_err,
+            )
         raise
 
 
@@ -57,6 +68,14 @@ def save_json_ids(
     path: Path, ids: set[int], max_count: int, key: str = "article_ids",
 ) -> None:
     """Save a bounded set of IDs to a JSON file.
+
+    Written format::
+
+        {"article_ids": [1, 2, 3, ...], "count": N}
+
+    The ``count`` field mirrors ``len(article_ids)`` and is informational only.
+    Callers reading the count MUST use ``len(article_ids)`` — not the ``count``
+    field — since ``count`` may be stale if the file is modified externally.
 
     Uses atomic write to prevent corruption. Keeps only the most recent
     entries if over max_count.
