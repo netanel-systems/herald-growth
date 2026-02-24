@@ -71,8 +71,10 @@ class DevToBrowser:
         '#user_password',
     )
     SELS_LOGIN_SUBMIT = (
-        '[data-testid="login-form"] button[type="submit"]',
-        'form.sign-in-form button[type="submit"]',
+        '#new_user input[type="submit"][name="commit"]',
+        'form.new_user input[type="submit"]',
+        '#new_user button[type="submit"]',
+        'form[action="/users/sign_in"] input[type="submit"]',
     )
     SEL_LOGGED_IN = 'meta[name="user-signed-in"][content="true"]'
     SEL_REACTION_DRAWER = "#reaction-drawer-trigger"
@@ -370,50 +372,81 @@ class DevToBrowser:
                 logger.error("Browser page not initialized for reaction.")
                 return False, False
 
-            self._page.goto(article_url, wait_until="domcontentloaded")
-            self._human_delay(1.0, 2.5)
+            self._page.goto(article_url, wait_until="networkidle")
+            self._human_delay(1.5, 3.0)
 
-            # For non-like reactions, hover the drawer trigger first
-            if category != "like":
-                drawer = self._page.locator(self.SEL_REACTION_DRAWER)
-                if drawer.is_visible():
-                    drawer.hover()
-                    self._human_delay(0.3, 0.8)
-
-            # Find the reaction button
-            selector = self.SEL_REACTION_BUTTON.format(category=category)
-            button = self._page.locator(selector)
-
-            if not button.is_visible():
+            # The sidebar heart icon is #reaction-drawer-trigger.
+            # Clicking it = "like". Hovering it = opens drawer with all categories.
+            drawer_trigger = self._page.locator(self.SEL_REACTION_DRAWER)
+            if not drawer_trigger.is_visible():
                 logger.warning(
-                    "Reaction button '%s' not visible on article %d.",
-                    category, article_id,
+                    "Reaction drawer trigger not visible on article %d.",
+                    article_id,
                 )
-                self._save_debug_screenshot(f"reaction_not_visible_{article_id}")
+                self._save_debug_screenshot(f"reaction_no_drawer_{article_id}")
                 return False, False
 
-            # Check if already reacted
-            classes = button.get_attribute("class") or ""
-            if "user-activated" in classes:
-                logger.info(
-                    "Already reacted '%s' to article %d. Skipping.",
-                    category, article_id,
-                )
-                return True, False
+            if category == "like":
+                # "Like" = click the drawer trigger (sidebar heart) directly
+                classes = drawer_trigger.get_attribute("class") or ""
+                if "user-activated" in classes:
+                    logger.info(
+                        "Already reacted 'like' to article %d. Skipping.",
+                        article_id,
+                    )
+                    return True, False
 
-            # Click the reaction
-            button.click()
-            self._human_delay(0.5, 1.5)
+                drawer_trigger.click()
+                self._human_delay(0.5, 1.5)
 
-            # Verify activation
-            classes = button.get_attribute("class") or ""
-            if "user-activated" in classes:
-                logger.info(
-                    "Reacted '%s' to article %d via browser.",
-                    category, article_id,
-                )
-                self._save_session()
-                return True, False
+                # Verify activation on the trigger itself
+                classes = drawer_trigger.get_attribute("class") or ""
+                if "user-activated" in classes:
+                    logger.info(
+                        "Reacted 'like' to article %d via browser.",
+                        article_id,
+                    )
+                    self._save_session()
+                    return True, False
+            else:
+                # Non-like: hover drawer trigger to reveal all reaction buttons
+                drawer_trigger.hover()
+                self._human_delay(0.5, 1.0)
+
+                # Find the specific reaction button inside the drawer
+                selector = self.SEL_REACTION_BUTTON.format(category=category)
+                button = self._page.locator(selector)
+
+                if not button.is_visible():
+                    logger.warning(
+                        "Reaction button '%s' not visible on article %d.",
+                        category, article_id,
+                    )
+                    self._save_debug_screenshot(
+                        f"reaction_not_visible_{article_id}",
+                    )
+                    return False, False
+
+                classes = button.get_attribute("class") or ""
+                if "user-activated" in classes:
+                    logger.info(
+                        "Already reacted '%s' to article %d. Skipping.",
+                        category, article_id,
+                    )
+                    return True, False
+
+                button.click()
+                self._human_delay(0.5, 1.5)
+
+                # Verify activation
+                classes = button.get_attribute("class") or ""
+                if "user-activated" in classes:
+                    logger.info(
+                        "Reacted '%s' to article %d via browser.",
+                        category, article_id,
+                    )
+                    self._save_session()
+                    return True, False
 
             # Check if rate-limited
             if self._detect_rate_limit():
