@@ -28,15 +28,46 @@ Confirmed from Forem source code. API client is used for **reads only** (article
 
 ```text
 growth/
-├── browser.py    ← NEW: Playwright headless Chromium (login, react, comment)
+├── browser.py    ← Playwright headless Chromium (login, react, comment, reply)
 ├── scout.py      → API GET (article discovery)         — no change
-├── reactor.py    → browser.react_to_article()           — updated
-├── commenter.py  → browser.post_comment()               — updated
+├── reactor.py    → browser.react_to_article()           — no change
+├── commenter.py  → browser.post_comment()               — no change
+├── responder.py  ← NEW: engage with comments on OUR own articles
 ├── learner.py    → local file analytics                 — no change
 ├── tracker.py    → API GET (followers, reciprocity)     — no change
-├── client.py     → API GET only (reads)                 — no change
-├── config.py     → +6 browser settings                  — updated
+├── client.py     → API GET only (reads)                 — +get_articles_by_username, +get_article_comments
+├── config.py     → +6 browser settings                  — no new changes
 └── storage.py    → shared JSON utilities                — no change
+```
+
+## Own-Post Engagement Rules (NON-NEGOTIABLE)
+
+These rules govern how we interact with comments on our own articles. Violations
+damage Klement's reputation and will be logged.
+
+1. **One comment per post on others' content — no thread continuation.** We reply
+   once to someone else's post, then stop. Never continue a thread we started.
+2. **Every comment received on our own articles = like + reply.** No silent reads.
+   Every comment deserves both a like (show appreciation) and a specific reply.
+3. **Like the post before replying to it.** When commenting on someone else's content,
+   react first, then reply. This applies in commenter.py cycles.
+4. **Max engagement depth: 1 reply per incoming comment.** We respond to the first
+   comment from any person. We do not reply to our own reply. Thread ends there.
+5. **Dedup is strict.** responded_comments.json is the source of truth. Any comment
+   ID already in that file is skipped without exception.
+6. **Reply must be specific.** The reply must reference something the commenter said.
+   Generic replies ("Thanks for reading!") are a CRITICAL violation.
+
+### Responder Cron (2x daily)
+
+Runs AFTER the main engagement cycles.
+
+```cron
+# Own-post comment engagement — 9 AM UTC
+0 9 * * * cd ~/netanel/teams/herald_growth && .venv/bin/python -m growth.responder_main
+
+# Own-post comment engagement — 3 PM UTC
+0 15 * * * cd ~/netanel/teams/herald_growth && .venv/bin/python -m growth.responder_main
 ```
 
 ### Browser Session Flow
