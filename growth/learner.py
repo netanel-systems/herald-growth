@@ -60,16 +60,34 @@ class GrowthLearner:
     def store_learning(
         self, pattern: str, confidence: float, evidence: str,
     ) -> None:
-        """Persist a single learning insight."""
+        """Persist a single learning insight.
+
+        Deduplicates by pattern string before appending — same pattern
+        discovered on a later run updates confidence/evidence rather than
+        creating a new entry. This prevents unbounded duplicates when
+        analyze() is called on every cron cycle.
+        """
         learnings = self.load_learnings()
-        learnings.append({
-            "pattern": pattern,
-            "confidence": round(confidence, 2),
-            "evidence": evidence,
-            "discovered": datetime.now(timezone.utc).isoformat(),
-        })
+        existing_patterns = {item.get("pattern", ""): idx for idx, item in enumerate(learnings)}
+
+        if pattern in existing_patterns:
+            # Update confidence and evidence in place — pattern already known
+            idx = existing_patterns[pattern]
+            learnings[idx]["confidence"] = round(confidence, 2)
+            learnings[idx]["evidence"] = evidence
+            learnings[idx]["last_updated"] = datetime.now(timezone.utc).isoformat()
+            logger.info("Updated existing learning: %s (confidence=%.2f)", pattern, confidence)
+        else:
+            learnings.append({
+                "pattern": pattern,
+                "confidence": round(confidence, 2),
+                "evidence": evidence,
+                "discovered": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.info("Stored new learning: %s (confidence=%.2f)", pattern, confidence)
+
         self.save_learnings(learnings)
-        logger.info("Stored learning: %s (confidence=%.2f)", pattern, confidence)
+
 
     def get_insights_for_prompt(self, max_insights: int = 5) -> list[str]:
         """Get top learnings as bullet points for Nathan's comment prompt.
