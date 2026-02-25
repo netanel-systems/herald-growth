@@ -23,6 +23,7 @@ from pathlib import Path
 from growth.browser import BrowserError, BrowserLoginRequired, DevToBrowser
 from growth.client import DevToClient, DevToError
 from growth.config import GrowthConfig, load_config
+from growth.learner import GrowthLearner
 from growth.scout import ArticleScout
 from growth.storage import load_json_ids, save_json_ids
 
@@ -119,14 +120,30 @@ class ReactionEngine:
             f.write(json.dumps(entry) + "\n")
 
     def trim_engagement_log(self) -> None:
-        """Trim engagement log to max_engagement_log entries."""
+        """Trim engagement log to max_engagement_log entries. Atomic write."""
+        import os
+        import tempfile
+
         path = self.data_dir / "engagement_log.jsonl"
         if not path.exists():
             return
-        lines = path.read_text().strip().split("\n")
+        lines = [line for line in path.read_text().strip().split("\n") if line.strip()]
         if len(lines) > self.config.max_engagement_log:
             trimmed = lines[-self.config.max_engagement_log:]
-            path.write_text("\n".join(trimmed) + "\n")
+            content = "\n".join(trimmed) + "\n"
+            fd, tmp_path = tempfile.mkstemp(
+                dir=path.parent, suffix=".tmp", prefix=".engagement_",
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(content)
+                os.replace(tmp_path, path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
             logger.info(
                 "Trimmed engagement log: %d -> %d entries.",
                 len(lines), len(trimmed),
@@ -157,6 +174,52 @@ class ReactionEngine:
     ) -> tuple[bool, bool]:
         """React to an article using the API (admin-only — will fail for regular users)."""
         return self.client.react_to_article(article_id, category=category)
+
+    def _filter_by_learner(self, candidates: list[dict]) -> list[dict]:
+        """Remove candidates whose tags are flagged low-performing by GrowthLearner.
+
+        Safe: any exception from the learner is logged and the full unfiltered
+        candidate list is returned so the cycle continues unaffected.
+        """
+        try:
+            learner = GrowthLearner(self.config)
+            filtered: list[dict] = []
+            skipped_by_learner = 0
+            for article in candidates:
+                tags = [
+                    t.get("name", t) if isinstance(t, dict) else t
+                    for t in article.get("tag_list", article.get("tags", []))
+                ]
+                if any(learner.should_skip_tag(tag) for tag in tags if isinstance(tag, str)):
+                    skipped_by_learner += 1
+                    logger.info(
+                        "Learner skipping article %d (low-performing tags: %s)",
+                        article.get("id"), tags,
+                    )
+                else:
+                    filtered.append(article)
+            if skipped_by_learner:
+                logger.info(
+                    "Learner filtered %d candidates (low-performing tags).",
+                    skipped_by_learner,
+                )
+            return filtered
+        except Exception:
+            logger.exception("GrowthLearner.should_skip_tag() raised — using unfiltered candidates.")
+            return candidates
+
+    def _run_learner_analyze(self) -> None:
+        """Run GrowthLearner.analyze() after cycle completes.
+
+        Safe: any exception is logged and silently swallowed so the
+        cycle result and summary are never affected by learner errors.
+        """
+        try:
+            learner = GrowthLearner(self.config)
+            new_learnings = learner.analyze()
+            logger.info("GrowthLearner.analyze() complete: %d new learnings.", len(new_learnings))
+        except Exception:
+            logger.exception("GrowthLearner.analyze() raised — cycle result unaffected.")
 
     def run(self) -> dict:
         """Main entry point for cron. Finds articles, reacts, logs.
@@ -203,6 +266,9 @@ class ReactionEngine:
                     "Attempt %d: %d candidates (need %d). Sampling new tags...",
                     attempt + 1, len(candidates), max_reactions,
                 )
+            # Filter candidates using learner intelligence — skip low-performing tags
+            candidates = self._filter_by_learner(candidates)
+
             reacted_count = 0
             skipped_count = 0
             failed_count = 0
@@ -238,8 +304,13 @@ class ReactionEngine:
                 else:
                     failed_count += 1
                     if rate_limited:
-                        logger.info("Rate limited on article %d. Stopping early.", aid)
-                        break
+                        remaining = len(candidates[:max_reactions]) - idx - 1
+                        logger.warning(
+                            "Rate limited on article %d. Backing off 5s, then next (%d remaining).",
+                            aid, remaining,
+                        )
+                        time.sleep(5)
+                        continue
                     logger.info("Reaction failed on article %d. Continuing.", aid)
 
                 # Delay after every attempt (success or fail) for rate-limit safety
@@ -252,6 +323,9 @@ class ReactionEngine:
 
             # Periodic log trimming
             self.trim_engagement_log()
+
+            # Run learning analysis after each cycle — safe, never crashes cycle
+            self._run_learner_analyze()
 
             elapsed = time.time() - start
             summary = {
