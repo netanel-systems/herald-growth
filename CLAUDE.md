@@ -270,3 +270,18 @@ Seven bugs fixed in the `fix/growth-bugs` branch. System state after fixes:
 ```
 
 `count` is informational. Always use `len(article_ids)` for the actual count.
+
+---
+
+## Monitoring Integration
+
+The growth dashboard (`teams/monitoring`) reads this team's data to report **dev.to platform metrics**.
+Herald Growth is the dev.to engagement engine — the monitoring collector reads three files from this team:
+
+| File | What it tracks | Read by |
+|------|---------------|---------|
+| `teams/herald_growth/data/follower_snapshots.jsonl` | dev.to follower count (written by tracker.py) | `collect_devto()` in monitoring |
+| `.nathan/teams/herald_growth/state.json` | `total_reactions`, `total_comments` (lifetime totals) | `collect_devto()` in monitoring |
+| `teams/herald_growth/data/engagement_log.jsonl` | Per-action engagement log | Future analytics |
+
+**Rule:** Do NOT create a separate "Herald Growth" dashboard card. This team's data feeds the unified dev.to card. If you add new metrics to state.json, update `collect_devto()` in `teams/monitoring/monitoring/collector.py` to surface them.
