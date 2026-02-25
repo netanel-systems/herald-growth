@@ -46,7 +46,7 @@ class GrowthConfig(BaseSettings):
     drafts_dir: Path = Field(default_factory=lambda: Path("drafts"))
 
     # --- Reaction Settings ---
-    max_reactions_per_run: int = Field(default=10, ge=1, le=50)
+    max_reactions_per_run: int = Field(default=20, ge=1, le=50)
     reaction_delay: float = Field(
         default=2.0, ge=0.5, le=10.0,
         description="Seconds between reactions (rate limit safety)",
