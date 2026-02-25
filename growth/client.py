@@ -216,6 +216,39 @@ class DevToClient:
 
     # --- Comments ---
 
+    def get_articles_by_username(
+        self, username: str, per_page: int = 10, page: int = 1,
+    ) -> list[dict]:
+        """Fetch published articles authored by a specific username.
+
+        Uses GET /api/articles?username={username} (public endpoint).
+        Returns list of article dicts with id, title, url, slug, etc.
+
+        Args:
+            username: dev.to username to fetch articles for.
+            per_page: Number of articles (max 30).
+            page: Page number for pagination.
+        """
+        params: dict = {
+            "username": username,
+            "per_page": min(per_page, 30),
+            "page": page,
+        }
+        return self._request("GET", "/articles", params=params)
+
+    def get_article_comments(self, article_id: int) -> list[dict]:
+        """Get all top-level comments on an article.
+
+        Alias for get_comments() with explicit name for responder usage.
+        Returns top-level comments with nested children.
+        Each comment has: id_code, body_html, user, children, created_at.
+
+        Note: We only engage with top-level comments (id_code present at root).
+        Nested children are available but the responder ignores them to avoid
+        thread continuation beyond depth 1.
+        """
+        return self.get_comments(article_id)
+
     def get_comments(self, article_id: int) -> list[dict]:
         """Get all comments on an article.
 

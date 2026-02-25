@@ -28,15 +28,46 @@ Confirmed from Forem source code. API client is used for **reads only** (article
 
 ```text
 growth/
-├── browser.py    ← NEW: Playwright headless Chromium (login, react, comment)
+├── browser.py    ← Playwright headless Chromium (login, react, comment, reply)
 ├── scout.py      → API GET (article discovery)         — no change
-├── reactor.py    → browser.react_to_article()           — updated
-├── commenter.py  → browser.post_comment()               — updated
+├── reactor.py    → browser.react_to_article()           — no change
+├── commenter.py  → browser.post_comment()               — no change
+├── responder.py  ← NEW: engage with comments on OUR own articles
 ├── learner.py    → local file analytics                 — no change
 ├── tracker.py    → API GET (followers, reciprocity)     — no change
-├── client.py     → API GET only (reads)                 — no change
-├── config.py     → +6 browser settings                  — updated
+├── client.py     → API GET only (reads)                 — +get_articles_by_username, +get_article_comments
+├── config.py     → +6 browser settings                  — no new changes
 └── storage.py    → shared JSON utilities                — no change
+```
+
+## Own-Post Engagement Rules (NON-NEGOTIABLE)
+
+These rules govern how we interact with comments on our own articles. Violations
+damage Klement's reputation and will be logged.
+
+1. **One comment per post on others' content — no thread continuation.** We reply
+   once to someone else's post, then stop. Never continue a thread we started.
+2. **Every comment received on our own articles = like + reply.** No silent reads.
+   Every comment deserves both a like (show appreciation) and a specific reply.
+3. **Like the post before replying to it.** When commenting on someone else's content,
+   react first, then reply. This applies in commenter.py cycles.
+4. **Max engagement depth: 1 reply per incoming comment.** We respond to the first
+   comment from any person. We do not reply to our own reply. Thread ends there.
+5. **Dedup is strict.** responded_comments.json is the source of truth. Any comment
+   ID already in that file is skipped without exception.
+6. **Reply must be specific.** The reply must reference something the commenter said.
+   Generic replies ("Thanks for reading!") are a CRITICAL violation.
+
+### Responder Cron (2x daily)
+
+Runs AFTER the main engagement cycles.
+
+```cron
+# Own-post comment engagement — 9 AM UTC
+0 9 * * * cd ~/netanel/teams/herald_growth && .venv/bin/python -m growth.responder_main
+
+# Own-post comment engagement — 3 PM UTC
+0 15 * * * cd ~/netanel/teams/herald_growth && .venv/bin/python -m growth.responder_main
 ```
 
 ### Browser Session Flow
@@ -212,3 +243,45 @@ webdev, javascript, devops, productivity, architecture, opensource, career, disc
 | `~/.nathan/teams/herald_growth/UNKNOWNS.md` | Open questions |
 | `~/.nathan/teams/herald_growth/state.json` | Session state |
 | `~/.nathan/teams/herald_growth/knowledge/comment-style-guide.md` | Comment rules |
+
+---
+
+## Bug Fixes Applied (2026-02-23)
+
+Seven bugs fixed in the `fix/growth-bugs` branch. System state after fixes:
+
+| # | File | Bug | Fix |
+|---|------|-----|-----|
+| A | `reactor.py` | Rate limit `break` stopped entire cycle | Changed to `continue`; logs how many articles remain |
+| B | `learner.py` | `get_reaction_count()` returned 0 (read missing `count` field) | Now reads `len(article_ids)` — the actual list length |
+| C | `browser.py` | CAPTCHA `text=` selector invalid in Playwright `locator()` | Moved to `CAPTCHA_TEXT_INDICATORS`; uses `get_by_text()` in detection loop |
+| D | `browser.py` | Drawer hover delay too short (0.5-1.0s) for non-like reactions | Replaced fixed sleep with `wait_for(state="visible", timeout=3000)` + fallback |
+| E | `commenter.py` | Quality gate used substring match — false positives on "totally agree, here's why..." | Regex word boundaries (`\b`); sentence split uses lookbehind `(?<=[.!?])\s+` |
+| F | `commenter.py` | `trim_engagement_log()` called per-comment inside `_log_engagement()` — O(N²) | Removed from `_log_engagement()`; callers must call trim once after full cycle |
+| G | `storage.py` | No docstring explaining `article_ids` vs `count` field semantics | Added clear docstrings to `load_json_ids()` and `save_json_ids()` |
+| H | `storage.py` | Temp file cleanup on `atomic_write_json()` failure was silent | `OSError` during cleanup now logged as warning instead of silently swallowed |
+
+### Key Invariant (storage.py)
+
+`reacted.json` and `commented.json` format:
+
+```json
+{"article_ids": [1, 2, 3], "count": 3}
+```
+
+`count` is informational. Always use `len(article_ids)` for the actual count.
+
+---
+
+## Monitoring Integration
+
+The growth dashboard (`teams/monitoring`) reads this team's data to report **dev.to platform metrics**.
+Herald Growth is the dev.to engagement engine — the monitoring collector reads three files from this team:
+
+| File | What it tracks | Read by |
+|------|---------------|---------|
+| `teams/herald_growth/data/follower_snapshots.jsonl` | dev.to follower count (written by tracker.py) | `collect_devto()` in monitoring |
+| `.nathan/teams/herald_growth/state.json` | `total_reactions`, `total_comments` (lifetime totals) | `collect_devto()` in monitoring |
+| `teams/herald_growth/data/engagement_log.jsonl` | Per-action engagement log | Future analytics |
+
+**Rule:** Do NOT create a separate "Herald Growth" dashboard card. This team's data feeds the unified dev.to card. If you add new metrics to state.json, update `collect_devto()` in `teams/monitoring/monitoring/collector.py` to surface them.

@@ -161,8 +161,9 @@ class GrowthTracker:
             f.write(json.dumps(entry) + "\n")
 
     def _save_weekly_report(self, report: dict) -> None:
-        """Save the weekly report to disk."""
+        """Save the weekly report to disk. Uses atomic write."""
+        from growth.storage import atomic_write_json
+
         path = self.data_dir / "weekly_report.json"
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(report, f, indent=2)
+        atomic_write_json(path, report)
