@@ -173,7 +173,7 @@ class OwnPostResponder:
 
     def like_comment_via_browser(
         self,
-        comment_id: int,
+        comment_id_code: str,
         article_url: str,
     ) -> bool:
         """Like a comment using the Playwright browser.
@@ -183,25 +183,31 @@ class OwnPostResponder:
 
         Note: DevToBrowser.like_comment() is used when available. If not
         implemented on the browser instance, falls back gracefully.
+
+        Args:
+            comment_id_code: The ``id_code`` string from the Forem API.
+            article_url: Full article URL.
         """
         try:
             if hasattr(self.browser, "like_comment"):
-                result = self.browser.like_comment(comment_id, article_url)
+                result = self.browser.like_comment(comment_id_code, article_url)
                 return result is not False
             # Fallback: method not yet implemented — log and continue
             logger.info(
-                "browser.like_comment() not available for comment %d. "
+                "browser.like_comment() not available for comment %s. "
                 "Skipping like, proceeding to reply.",
-                comment_id,
+                comment_id_code,
             )
             return False
         except BrowserLoginRequired:
-            logger.error("Cannot like comment %d — login required.", comment_id)
+            logger.error(
+                "Cannot like comment %s — login required.", comment_id_code,
+            )
             return False
         except Exception as exc:
             logger.warning(
-                "Like comment %d failed (non-fatal, continuing to reply): %s",
-                comment_id, exc,
+                "Like comment %s failed (non-fatal, continuing to reply): %s",
+                comment_id_code, exc,
             )
             return False
 
@@ -347,13 +353,15 @@ class OwnPostResponder:
                 if processed_this_run >= MAX_COMMENTS_PER_RUN:
                     break
 
-                # Forem API returns 'id_code' (string slug) and numeric 'id'.
-                # browser.reply_to_comment() needs the numeric integer id.
-                comment_id_int: int | None = comment.get("id")
+                # Forem API returns 'id_code' (string slug) on the
+                # GET /api/comments?a_id= endpoint.  The numeric 'id' is
+                # NOT present in that response.  All downstream methods
+                # (browser.reply_to_comment, like_comment_via_browser)
+                # accept id_code strings.
                 comment_id_code: str = str(
-                    comment.get("id_code") or comment.get("id") or ""
+                    comment.get("id_code") or ""
                 )
-                if not comment_id_code or comment_id_int is None:
+                if not comment_id_code:
                     continue
 
                 # Dedup: skip already responded
@@ -380,8 +388,8 @@ class OwnPostResponder:
                     comment_id_code, article_title[:50], commenter_username,
                 )
 
-                # Step 1: Like the comment (browser.like_comment takes integer id)
-                liked = self.like_comment_via_browser(comment_id_int, article_url)
+                # Step 1: Like the comment via browser automation
+                liked = self.like_comment_via_browser(comment_id_code, article_url)
                 if liked:
                     liked_count += 1
                     self._log_action(
@@ -402,10 +410,10 @@ class OwnPostResponder:
                     processed_this_run += 1
                     continue
 
-                # Step 3: Post the reply via browser (integer id required)
+                # Step 3: Post the reply via browser
                 try:
                     result = self.browser.reply_to_comment(
-                        comment_id_int, reply_text, article_url,
+                        comment_id_code, reply_text, article_url,
                     )
                     if result is not None:
                         replied_count += 1

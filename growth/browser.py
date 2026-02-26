@@ -109,8 +109,8 @@ class DevToBrowser:
 
     # Reply-to-comment selectors — verified from Forem source:
     # app/assets/javascripts/utilities/buildCommentHTML.js.erb
-    # app/assets/javascripts/utilities/buildCommentFormHTML.js.erb
-    # All interactions scoped to #comment-node-{id} for precision.
+    # app/views/comments/_comment.html.erb
+    # Container found via [data-path$="/comments/{id_code}"].
     SELS_REPLY_BUTTON = (
         ".toggle-reply-form",
         "button[data-tracking-name='comment_reply_button']",
@@ -694,33 +694,42 @@ class DevToBrowser:
 
     def reply_to_comment(
         self,
-        comment_id: int,
+        comment_id_code: str,
         body_markdown: str,
         article_url: str = "",
     ) -> dict | None:
         """Reply to an existing comment thread via the web form.
 
-        Scopes all interactions to the specific comment container
-        (#comment-node-{comment_id}) to avoid filling the wrong form.
+        Scopes all interactions to the specific comment container found
+        via ``[data-path$="/comments/{id_code}"]`` to avoid filling the
+        wrong form.
 
         Args:
-            comment_id: Numeric ID of the parent comment to reply to.
+            comment_id_code: The ``id_code`` string returned by the Forem
+                comments API (e.g. ``"34ohb"``).  The Forem DOM attaches
+                this value inside the ``data-path`` attribute on the
+                comment container div.
             body_markdown: Markdown text of the reply.
             article_url: Full article URL (required).
 
         Returns:
             Synthetic result dict on success, None on failure.
         """
-        # RID-001: Validate comment_id before constructing CSS selectors.
-        # Python type hints are not enforced at runtime; callers may pass strings
-        # containing CSS special characters (e.g. >, ], whitespace) that would
-        # cause locator() to silently select wrong DOM elements.
-        if not isinstance(comment_id, int) or comment_id <= 0:
-            logger.warning("Invalid comment_id for reply: %s", comment_id)
+        # RID-001: Validate comment_id_code before constructing CSS selectors.
+        # Must be a non-empty alphanumeric string — reject anything that could
+        # break a CSS attribute selector (e.g. quotes, brackets, whitespace).
+        if (
+            not isinstance(comment_id_code, str)
+            or not comment_id_code
+            or not comment_id_code.replace("-", "").replace("_", "").isalnum()
+        ):
+            logger.warning("Invalid comment_id_code for reply: %s", comment_id_code)
             return None
 
         if not article_url:
-            logger.warning("No article URL for reply to comment %d.", comment_id)
+            logger.warning(
+                "No article URL for reply to comment %s.", comment_id_code,
+            )
             return None
 
         try:
@@ -732,16 +741,20 @@ class DevToBrowser:
             self._page.goto(article_url, wait_until="domcontentloaded")
             self._human_delay(1.0, 2.0)
 
-            # Scope all interactions to the specific comment container
-            container_sel = f"#comment-node-{comment_id}"
+            # Scope all interactions to the specific comment container.
+            # The Forem DOM sets data-path=".../<article>/comments/<id_code>"
+            # on each comment div.  We match on the suffix to locate the node.
+            container_sel = f'[data-path$="/comments/{comment_id_code}"]'
             try:
                 container = self._page.locator(container_sel).first
                 container.wait_for(state="visible", timeout=5000)
             except PlaywrightTimeoutError:
                 self._save_debug_screenshot(
-                    f"reply_container_not_found_{comment_id}"
+                    f"reply_container_not_found_{comment_id_code}"
                 )
-                logger.warning("Comment node #%d not found on page.", comment_id)
+                logger.warning(
+                    "Comment node %s not found on page.", comment_id_code,
+                )
                 return None
 
             # Click the reply button within the comment container
@@ -757,44 +770,42 @@ class DevToBrowser:
 
             if reply_btn is None:
                 self._save_debug_screenshot(
-                    f"reply_button_not_found_{comment_id}"
+                    f"reply_button_not_found_{comment_id_code}"
                 )
-                logger.warning("Reply button not found for comment %d.", comment_id)
+                logger.warning(
+                    "Reply button not found for comment %s.", comment_id_code,
+                )
                 return None
 
             reply_btn.click()
             self._human_delay(0.5, 1.0)
 
-            # Find the reply textarea — prefer ID-scoped selector (#textarea-for-{id})
-            # for precision over class-based fallbacks, since each comment has a unique
-            # textarea ID. Timeout standardized to 2000ms across all selector attempts.
+            # Find the reply textarea within the container.  The Forem DOM
+            # names each textarea ``#textarea-for-{numeric_id}``, but the API
+            # only provides the string ``id_code`` — not the numeric ID.
+            # We therefore rely on class-based selectors scoped to the
+            # already-resolved container div (safe: one textarea per node).
             textarea = None
-            id_sel = f"textarea#textarea-for-{comment_id}"
-            try:
-                loc = self._page.locator(id_sel).first
-                if loc.is_visible(timeout=2000):
-                    textarea = loc
-                    logger.debug("Reply textarea found via ID selector for comment %d.", comment_id)
-            except PlaywrightTimeoutError:
-                pass
-
-            if textarea is None:
-                for sel in self.SELS_REPLY_TEXTAREA:
-                    loc = container.locator(sel).first
-                    try:
-                        if loc.is_visible(timeout=2000):
-                            textarea = loc
-                            logger.debug("Reply textarea found via fallback selector '%s'.", sel)
-                            break
-                    except PlaywrightTimeoutError:
-                        continue
+            for sel in self.SELS_REPLY_TEXTAREA:
+                loc = container.locator(sel).first
+                try:
+                    if loc.is_visible(timeout=2000):
+                        textarea = loc
+                        logger.debug(
+                            "Reply textarea found via selector '%s' for "
+                            "comment %s.", sel, comment_id_code,
+                        )
+                        break
+                except PlaywrightTimeoutError:
+                    continue
 
             if textarea is None:
                 self._save_debug_screenshot(
-                    f"reply_textarea_not_found_{comment_id}"
+                    f"reply_textarea_not_found_{comment_id_code}"
                 )
                 logger.warning(
-                    "Reply textarea not found for comment %d.", comment_id
+                    "Reply textarea not found for comment %s.",
+                    comment_id_code,
                 )
                 return None
 
@@ -816,10 +827,11 @@ class DevToBrowser:
 
             if submit_btn is None:
                 self._save_debug_screenshot(
-                    f"reply_submit_not_found_{comment_id}"
+                    f"reply_submit_not_found_{comment_id_code}"
                 )
                 logger.warning(
-                    "Reply submit button not found for comment %d.", comment_id
+                    "Reply submit button not found for comment %s.",
+                    comment_id_code,
                 )
                 return None
 
@@ -844,31 +856,35 @@ class DevToBrowser:
 
             if posted:
                 logger.info(
-                    "Reply posted to comment %d via browser (%d chars).",
-                    comment_id, len(body_markdown),
+                    "Reply posted to comment %s via browser (%d chars).",
+                    comment_id_code, len(body_markdown),
                 )
                 self._save_session()
                 return {
                     "status": "replied",
-                    "comment_id": comment_id,
+                    "comment_id_code": comment_id_code,
                     "source": "browser",
                 }
 
-            logger.warning("Reply may not have posted to comment %d.", comment_id)
-            self._save_debug_screenshot(f"reply_failed_{comment_id}")
+            logger.warning(
+                "Reply may not have posted to comment %s.", comment_id_code,
+            )
+            self._save_debug_screenshot(f"reply_failed_{comment_id_code}")
             return None
 
         except BrowserLoginRequired:
             logger.error("Cannot reply — login required.")
             return None
         except PlaywrightTimeoutError:
-            logger.warning("Reply to comment %d timed out.", comment_id)
-            self._save_debug_screenshot(f"reply_timeout_{comment_id}")
+            logger.warning(
+                "Reply to comment %s timed out.", comment_id_code,
+            )
+            self._save_debug_screenshot(f"reply_timeout_{comment_id_code}")
             return None
         except Exception as exc:
             logger.error(
-                "Unexpected browser error replying to comment %d: %s",
-                comment_id, exc,
+                "Unexpected browser error replying to comment %s: %s",
+                comment_id_code, exc,
             )
             return None
 

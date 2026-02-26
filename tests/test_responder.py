@@ -29,9 +29,13 @@ def _make_config(tmp_path: Path) -> GrowthConfig:
     return config
 
 
-def _make_comment(comment_id: int, id_code: str, username: str, body: str) -> dict:
+def _make_comment(id_code: str, username: str, body: str) -> dict:
+    """Build a comment dict matching the real Forem API response.
+
+    The ``GET /api/comments?a_id=`` endpoint does NOT return a numeric
+    ``id`` — only ``id_code`` (string).  Tests must mirror that reality.
+    """
     return {
-        "id": comment_id,
         "id_code": id_code,
         "body_html": body,
         "user": {"username": username},
@@ -75,7 +79,7 @@ class TestOwnPostResponderDedup(unittest.TestCase):
             _make_article(1, "My Article", "https://dev.to/testuser/my-article")
         ]
         responder.client.get_article_comments.return_value = [
-            _make_comment(100, "abc123", "someuser", "Great work!")
+            _make_comment("abc123", "someuser", "Great work!")
         ]
 
         summary = responder.run()
@@ -89,13 +93,13 @@ class TestOwnPostResponderDedup(unittest.TestCase):
         responder = self._make_responder()
         responder.browser.like_comment.return_value = True
         responder.browser.reply_to_comment.return_value = {
-            "status": "replied", "comment_id": 101, "source": "browser",
+            "status": "replied", "comment_id_code": "newcode", "source": "browser",
         }
         responder.client.get_articles_by_username.return_value = [
             _make_article(1, "My Article", "https://dev.to/testuser/my-article")
         ]
         responder.client.get_article_comments.return_value = [
-            _make_comment(101, "newcode", "reader", "I learned a lot from this section.")
+            _make_comment("newcode", "reader", "I learned a lot from this section.")
         ]
 
         summary = responder.run()
@@ -105,6 +109,28 @@ class TestOwnPostResponderDedup(unittest.TestCase):
         responded_ids = responder.load_responded_ids()
         self.assertIn("newcode", responded_ids)
 
+    def test_comment_without_numeric_id_is_not_skipped(self):
+        """Regression: API returns id_code but NO numeric id — must NOT be skipped."""
+        responder = self._make_responder()
+        responder.browser.like_comment.return_value = True
+        responder.browser.reply_to_comment.return_value = {
+            "status": "replied", "comment_id_code": "34ohb", "source": "browser",
+        }
+        responder.client.get_articles_by_username.return_value = [
+            _make_article(1, "My Article", "https://dev.to/testuser/my-article")
+        ]
+        # Real API response: only id_code, no numeric id
+        responder.client.get_article_comments.return_value = [
+            {"id_code": "34ohb", "body_html": "The benchmark design problem...",
+             "user": {"username": "matthewhou"}, "children": []}
+        ]
+
+        summary = responder.run()
+
+        self.assertEqual(summary["replied"], 1)
+        responded_ids = responder.load_responded_ids()
+        self.assertIn("34ohb", responded_ids)
+
     def test_own_comment_is_skipped_and_marked(self):
         """Our own comments should be skipped and marked to avoid re-checking."""
         responder = self._make_responder()
@@ -112,7 +138,7 @@ class TestOwnPostResponderDedup(unittest.TestCase):
             _make_article(1, "My Article", "https://dev.to/testuser/my-article")
         ]
         responder.client.get_article_comments.return_value = [
-            _make_comment(102, "owncode", "testuser", "I wrote this.")
+            _make_comment("owncode", "testuser", "I wrote this.")
         ]
 
         summary = responder.run()
@@ -147,7 +173,7 @@ class TestOwnPostResponderQualityGate(unittest.TestCase):
             _make_article(1, "My Article", "https://dev.to/testuser/my-article")
         ]
         responder.client.get_article_comments.return_value = [
-            _make_comment(200, "code200", "reader2", "Interesting stuff here.")
+            _make_comment("code200", "reader2", "Interesting stuff here.")
         ]
 
         summary = responder.run()
@@ -165,7 +191,7 @@ class TestOwnPostResponderQualityGate(unittest.TestCase):
             _make_article(1, "My Article", "https://dev.to/testuser/my-article")
         ]
         responder.client.get_article_comments.return_value = [
-            _make_comment(201, "code201", "devfan", "The async section was really well explained.")
+            _make_comment("code201", "devfan", "The async section was really well explained.")
         ]
 
         summary = responder.run()
@@ -299,7 +325,7 @@ class TestOwnPostResponderAPIFailure(unittest.TestCase):
             _make_article(1, "My Article", "https://dev.to/testuser/my-article")
         ]
         responder.client.get_article_comments.return_value = [
-            _make_comment(300, "code300", "reader3", "The DB section made sense to me.")
+            _make_comment("code300", "reader3", "The DB section made sense to me.")
         ]
         # Browser reply raises unexpected exception
         responder.browser.reply_to_comment.side_effect = RuntimeError("Browser crashed")
@@ -322,7 +348,7 @@ class TestOwnPostResponderAPIFailure(unittest.TestCase):
             _make_article(1, "My Article", "https://dev.to/testuser/my-article")
         ]
         responder.client.get_article_comments.return_value = [
-            _make_comment(400, "code400", "reader4", "What about error handling?")
+            _make_comment("code400", "reader4", "What about error handling?")
         ]
 
         # Must not raise
