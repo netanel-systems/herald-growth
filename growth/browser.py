@@ -1022,6 +1022,120 @@ class DevToBrowser:
             )
             return False
 
+    # --- Follow ---
+
+    # Follow button selectors — verified from Forem source code:
+    # app/views/users/_follow_button.html.erb
+    # app/javascript/packs/followButtons.js
+    SELS_FOLLOW_BUTTON = (
+        "button[data-info*='\"action\":\"follow\"'][data-info*='\"className\":\"User\"']",
+        ".follow-action-button",
+        "button.crayons-btn.follow-action-button",
+        "button[aria-label*='follow']",
+    )
+
+    def follow_user(self, profile_url: str) -> bool:
+        """Follow a dev.to user by clicking the Follow button on their profile.
+
+        Navigates to the profile URL, finds the Follow button, clicks it,
+        and verifies the state changes to "Following".
+
+        Args:
+            profile_url: Full profile URL (e.g. https://dev.to/username).
+
+        Returns:
+            True on success (followed or already following), False on failure.
+        """
+        try:
+            self.ensure_logged_in()
+            if self._page is None:
+                logger.error("Browser page not initialized for follow.")
+                return False
+
+            self._page.goto(profile_url, wait_until="domcontentloaded")
+            self._human_delay(1.5, 3.0)
+
+            # Check for CAPTCHA
+            if self._detect_captcha():
+                self._save_debug_screenshot("follow_captcha")
+                logger.error("CAPTCHA detected on profile page. Aborting follow.")
+                return False
+
+            # Find the Follow button using selector fallbacks
+            follow_btn = None
+            for sel in self.SELS_FOLLOW_BUTTON:
+                try:
+                    loc = self._page.locator(sel).first
+                    if loc.is_visible(timeout=2000):
+                        follow_btn = loc
+                        break
+                except PlaywrightTimeoutError:
+                    continue
+
+            if follow_btn is None:
+                self._save_debug_screenshot("follow_button_not_found")
+                logger.warning(
+                    "Follow button not found on profile: %s", profile_url,
+                )
+                return False
+
+            # Check if already following (button text says "Following")
+            btn_text = (follow_btn.inner_text() or "").strip().lower()
+            if btn_text == "following":
+                logger.info(
+                    "Already following user at %s. Skipping.", profile_url,
+                )
+                return True
+
+            # Click the follow button
+            follow_btn.click()
+            self._human_delay(0.5, 1.5)
+
+            # Verify button state changed to "Following"
+            try:
+                new_text = (follow_btn.inner_text() or "").strip().lower()
+                if new_text == "following":
+                    logger.info("Followed user at %s via browser.", profile_url)
+                    self._save_session()
+                    return True
+            except Exception:
+                pass
+
+            # Fallback: check if any button now says "Following"
+            for sel in self.SELS_FOLLOW_BUTTON:
+                try:
+                    loc = self._page.locator(sel).first
+                    if loc.is_visible(timeout=1000):
+                        text = (loc.inner_text() or "").strip().lower()
+                        if text == "following":
+                            logger.info(
+                                "Followed user at %s (verified via fallback).",
+                                profile_url,
+                            )
+                            self._save_session()
+                            return True
+                except PlaywrightTimeoutError:
+                    continue
+
+            logger.warning(
+                "Follow click did not change button state at %s.", profile_url,
+            )
+            self._save_debug_screenshot("follow_state_unchanged")
+            return False
+
+        except BrowserLoginRequired:
+            logger.error("Cannot follow — login required.")
+            return False
+        except PlaywrightTimeoutError:
+            logger.warning("Follow timed out at %s.", profile_url)
+            self._save_debug_screenshot("follow_timeout")
+            return False
+        except Exception as exc:
+            logger.error(
+                "Unexpected browser error following %s: %s", profile_url, exc,
+            )
+            return False
+
     # --- Detection Helpers ---
 
     def _detect_rate_limit(self) -> bool:
