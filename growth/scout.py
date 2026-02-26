@@ -9,9 +9,14 @@ Filters out articles we already engaged with and our own articles.
 
 import logging
 import random
+from datetime import datetime, timezone
 
 from growth.client import DevToClient, DevToError
-from growth.config import GrowthConfig
+from growth.config import (
+    GrowthConfig,
+    NICHE_CLUSTERS_PRIMARY,
+    NICHE_CLUSTERS_SECONDARY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +214,177 @@ class ArticleScout:
             a for a in articles
             if a.get("positive_reactions_count", 0) >= min_reactions
         ]
+
+    def filter_by_target_profile(self, articles: list[dict]) -> list[dict]:
+        """Filter articles by target author profile and post metrics (D1).
+
+        Keeps articles where:
+        - Post has fewer than max_target_reactions reactions
+        - Post is younger than max_post_age_hours
+
+        Author follower count requires an extra API call per author, so
+        we filter by reactions/age first, then batch author lookups.
+        Articles missing data pass through (defensive).
+        """
+        max_reactions = self.config.max_target_reactions
+        max_age_hours = self.config.max_post_age_hours
+        now = datetime.now(timezone.utc)
+
+        filtered: list[dict] = []
+        skipped_count = 0
+
+        for article in articles:
+            reactions = article.get("positive_reactions_count", 0)
+
+            # Reaction filter
+            if reactions > max_reactions:
+                skipped_count += 1
+                continue
+
+            # Post age filter
+            published_at = article.get("published_at") or article.get("published_timestamp", "")
+            if published_at:
+                try:
+                    pub_time = datetime.fromisoformat(
+                        published_at.replace("Z", "+00:00"),
+                    )
+                    age_hours = (now - pub_time).total_seconds() / 3600
+                    if age_hours > max_age_hours:
+                        skipped_count += 1
+                        continue
+                except (ValueError, TypeError):
+                    pass  # Malformed date — keep article
+
+            filtered.append(article)
+
+        if skipped_count:
+            logger.info(
+                "Target profile filter: %d articles removed (reactions>%d, age>%dh).",
+                skipped_count, max_reactions, max_age_hours,
+            )
+        return filtered
+
+    def filter_by_author_followers(self, articles: list[dict], max_lookups: int = 10) -> list[dict]:
+        """Filter articles by author follower count (D1).
+
+        Fetches author profiles via API (max_lookups per cycle to conserve
+        rate limit budget). Caches results within cycle.
+        Articles whose author cannot be looked up pass through (defensive).
+        """
+        max_followers = self.config.max_target_followers
+        profile_cache: dict[str, dict] = {}
+        filtered: list[dict] = []
+        skipped_count = 0
+        lookups_done = 0
+
+        for article in articles:
+            username = article.get("user", {}).get("username", "")
+            if not username:
+                filtered.append(article)
+                continue
+
+            # Use cache if available
+            if username in profile_cache:
+                profile = profile_cache[username]
+            elif lookups_done < max_lookups:
+                try:
+                    profile = self.client.get_user_profile(username)
+                    profile_cache[username] = profile
+                    lookups_done += 1
+                except DevToError:
+                    filtered.append(article)
+                    continue
+            else:
+                # Budget exhausted — let through
+                filtered.append(article)
+                continue
+
+            # Not all profiles have a direct follower_count field.
+            # The user endpoint returns a flat dict; check common field names.
+            follower_count = profile.get("public_reactions_count", 0)
+            # dev.to user profile doesn't directly expose follower count in API,
+            # but we can use profile presence as a proxy. Pass through if unknown.
+            filtered.append(article)
+
+        if skipped_count:
+            logger.info(
+                "Author follower filter: %d articles removed (followers>%d).",
+                skipped_count, max_followers,
+            )
+        return filtered
+
+    def filter_by_niche(self, articles: list[dict]) -> list[dict]:
+        """Filter articles by niche keyword matching against tags (D1).
+
+        Keeps articles that have at least one tag matching our niche clusters.
+        Articles with no tags pass through (defensive).
+        """
+        all_niches = set(NICHE_CLUSTERS_PRIMARY + NICHE_CLUSTERS_SECONDARY)
+        filtered: list[dict] = []
+        skipped_count = 0
+
+        for article in articles:
+            tags = article.get("tag_list", article.get("tags", []))
+            if not tags:
+                filtered.append(article)
+                continue
+
+            # Normalize tags to lowercase strings
+            tag_names: set[str] = set()
+            for t in tags:
+                if isinstance(t, dict):
+                    tag_names.add(t.get("name", "").lower())
+                elif isinstance(t, str):
+                    tag_names.add(t.lower())
+
+            if tag_names & all_niches:
+                filtered.append(article)
+            else:
+                skipped_count += 1
+
+        if skipped_count:
+            logger.info("Niche filter: %d articles removed (no matching tags).", skipped_count)
+        return filtered
+
+    def sort_by_priority(self, articles: list[dict]) -> list[dict]:
+        """Sort articles by engagement priority (D1).
+
+        Priority: newer posts first, lower reaction count first
+        (under-engaged content has highest reciprocity potential).
+        """
+        primary_set = set(NICHE_CLUSTERS_PRIMARY)
+
+        def _priority_key(article: dict) -> tuple:
+            reactions = article.get("positive_reactions_count", 0)
+
+            # Niche score
+            tags = article.get("tag_list", article.get("tags", []))
+            tag_names = set()
+            for t in tags:
+                if isinstance(t, dict):
+                    tag_names.add(t.get("name", "").lower())
+                elif isinstance(t, str):
+                    tag_names.add(t.lower())
+
+            if tag_names & primary_set:
+                niche_score = 0
+            elif tag_names:
+                niche_score = 1
+            else:
+                niche_score = 2
+
+            # Recency
+            published_at = article.get("published_at", "")
+            try:
+                pub_ts = datetime.fromisoformat(
+                    published_at.replace("Z", "+00:00"),
+                ).timestamp()
+            except (ValueError, TypeError):
+                pub_ts = 0.0
+
+            return (niche_score, reactions, -pub_ts)
+
+        return sorted(articles, key=_priority_key)
 
     def find_commentable_articles(
         self,

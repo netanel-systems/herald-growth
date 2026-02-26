@@ -20,6 +20,19 @@ DEFAULT_TARGET_TAGS: list[str] = [
     "beginners", "devops", "react", "tutorial", "opensource",
 ]
 
+# Niche clusters for scout targeting (D1).
+# Primary clusters: our core expertise. Secondary: adjacent topics we engage with.
+NICHE_CLUSTERS_PRIMARY: list[str] = [
+    "ai", "llm", "gpt", "machinelearning", "deeplearning",
+    "python", "langchain", "rag", "claude",
+    "automation", "devops", "docker", "kubernetes", "cicd",
+]
+NICHE_CLUSTERS_SECONDARY: list[str] = [
+    "javascript", "typescript", "react", "nextjs", "nodejs",
+    "opensource", "startup", "indiehacker", "saas", "career",
+    "webdev", "api", "graphql", "cloud", "datascience",
+]
+
 
 class GrowthConfig(BaseSettings):
     """Central configuration for Herald Growth engine.
@@ -45,22 +58,52 @@ class GrowthConfig(BaseSettings):
     data_dir: Path = Field(default_factory=lambda: Path("data"))
     drafts_dir: Path = Field(default_factory=lambda: Path("drafts"))
 
-    # --- Reaction Settings ---
+    # --- Reaction Settings (D2: volume increase) ---
     max_reactions_per_run: int = Field(default=20, ge=1, le=50)
     reaction_delay: float = Field(
-        default=2.0, ge=0.5, le=10.0,
-        description="Seconds between reactions (rate limit safety)",
+        default=1.5, ge=0.5, le=10.0,
+        description="Base seconds between reactions (randomized +/-30%)",
     )
 
-    # --- Comment Settings ---
-    max_comments_per_cycle: int = Field(default=5, ge=1, le=15)
+    # --- Comment Settings (D2: volume increase) ---
+    max_comments_per_cycle: int = Field(default=8, ge=1, le=15)
     comment_delay: float = Field(
-        default=3.0, ge=1.0, le=15.0,
-        description="Seconds between comments (rate limit safety)",
+        default=2.5, ge=1.0, le=15.0,
+        description="Base seconds between comments (randomized +/-30%)",
     )
     min_reactions_to_comment: int = Field(
         default=3, ge=0, le=100,
         description="Minimum reactions on article before we comment (quality filter)",
+    )
+
+    # --- Follow Settings (D2) ---
+    max_follows_per_day: int = Field(
+        default=200, ge=1, le=500,
+        description="Max follows per day (browser-based)",
+    )
+    follow_delay: float = Field(
+        default=3.0, ge=1.0, le=10.0,
+        description="Base seconds between follows (randomized +/-30%)",
+    )
+
+    # --- Volume Safety Guards (D2) ---
+    max_engagements_per_author_per_cycle: int = Field(
+        default=2, ge=1, le=5,
+        description="Max engagement actions on a single author per cycle",
+    )
+
+    # --- Scout Targeting (D1) ---
+    max_target_followers: int = Field(
+        default=500, ge=10, le=5000,
+        description="Max follower count for target authors (prefer smaller accounts)",
+    )
+    max_target_reactions: int = Field(
+        default=5, ge=0, le=50,
+        description="Max reaction count on post (under-engaged posts only)",
+    )
+    max_post_age_hours: int = Field(
+        default=48, ge=1, le=168,
+        description="Max post age in hours (fresh content only)",
     )
 
     # --- Browser Settings (Playwright for write operations) ---

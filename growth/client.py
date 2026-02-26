@@ -166,6 +166,20 @@ class DevToClient:
         """
         return self._request("GET", f"/articles/{article_id}")
 
+    # --- User Profiles (D1: scout targeting) ---
+
+    def get_user_profile(self, username: str) -> dict:
+        """Get a user's profile by username (D1: scout targeting).
+
+        Uses GET /api/users/by_username?url={username}.
+        Returns dict with username, joined_at, etc.
+        Raises DevToError on failure.
+        """
+        return self._request(
+            "GET", "/users/by_username",
+            params={"url": username},
+        )
+
     # --- Tags ---
 
     def get_tags(self, page: int = 1, per_page: int = 100) -> list[dict]:

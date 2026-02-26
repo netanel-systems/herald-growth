@@ -290,12 +290,23 @@ class ReactionEngine:
             skipped_count = 0
             failed_count = 0
             new_reacted: set[int] = set()
+            # Per-author engagement counter for this cycle (D2)
+            author_engagement_count: dict[str, int] = {}
+            max_per_author = self.config.max_engagements_per_author_per_cycle
 
             for idx, article in enumerate(candidates[:max_reactions]):
                 aid = article.get("id")
                 if not aid:
                     skipped_count += 1
                     continue
+
+                # Per-author cap check (D2)
+                author_username = article.get("user", {}).get("username", "")
+                if author_username:
+                    current_count = author_engagement_count.get(author_username, 0)
+                    if current_count >= max_per_author:
+                        skipped_count += 1
+                        continue
 
                 category = pick_reaction_category()
                 article_url = article.get("url", "")
@@ -314,6 +325,10 @@ class ReactionEngine:
                 if success:
                     reacted_count += 1
                     new_reacted.add(aid)
+                    if author_username:
+                        author_engagement_count[author_username] = (
+                            author_engagement_count.get(author_username, 0) + 1
+                        )
                     self.log_engagement("reaction", article, {
                         "category": category,
                         "method": "browser" if self.config.use_browser else "api",
@@ -330,9 +345,10 @@ class ReactionEngine:
                         continue
                     logger.info("Reaction failed on article %d. Continuing.", aid)
 
-                # Delay after every attempt (success or fail) for rate-limit safety
+                # Randomized delay between reactions (D2: +/-30%)
                 if idx < max_reactions - 1:
-                    time.sleep(self.config.reaction_delay)
+                    delay = self.config.reaction_delay * random.uniform(0.7, 1.3)
+                    time.sleep(delay)
 
             # Save updated reacted IDs
             reacted_ids.update(new_reacted)
