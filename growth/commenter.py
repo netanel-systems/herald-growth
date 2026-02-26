@@ -20,6 +20,7 @@ from growth.browser import DevToBrowser
 from growth.client import DevToClient, DevToError
 from growth.config import GrowthConfig
 from growth.learner import GrowthLearner
+from growth.schema import build_engagement_entry
 from growth.storage import load_json_ids, save_json_ids
 
 logger = logging.getLogger(__name__)
@@ -242,6 +243,8 @@ class CommentEngine:
         article_title: str,
         author: str,
         api_result: dict,
+        comment_template_category: str | None = None,
+        comment_has_question: bool | None = None,
     ) -> None:
         """Log comment details for performance tracking by learner."""
         path = self.data_dir / "comment_history.jsonl"
@@ -254,6 +257,8 @@ class CommentEngine:
             "comment_text": body,
             "comment_id": api_result.get("id_code", ""),
             "char_count": len(body),
+            "comment_template_category": comment_template_category,
+            "comment_has_question": comment_has_question,
         }
         with open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
@@ -265,23 +270,35 @@ class CommentEngine:
         article_title: str,
         author: str,
         method: str = "api",
+        cycle_id: str | None = None,
+        comment_template_category: str | None = None,
+        comment_has_question: bool | None = None,
     ) -> None:
-        """Append to shared engagement_log.jsonl."""
+        """Append to shared engagement_log.jsonl with enhanced X1 schema."""
         path = self.data_dir / "engagement_log.jsonl"
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "action": "comment",
-            "article_id": article_id,
-            "article_title": article_title[:100],
-            "author": author,
-            "comment_length": len(body),
-            "method": method,
-        }
+        entry = build_engagement_entry(
+            action="comment",
+            platform="devto",
+            target_username=author,
+            target_post_id=str(article_id),
+            target_followers_at_engagement=None,  # Populated when scout targeting ships
+            target_post_reactions_at_engagement=None,
+            target_post_age_hours=None,
+            comment_template_category=comment_template_category,
+            comment_has_question=comment_has_question,
+            cycle_id=cycle_id,
+            # Existing fields preserved
+            article_id=article_id,
+            article_title=article_title[:100],
+            author_username=author,
+            comment_length=len(body),
+            method=method,
+        )
         with open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
         # NOTE: Do NOT trim here — trim is O(N) and should be called once per cycle,
-        # not per comment (which would be O(N²)). Call trim_engagement_log() once
+        # not per comment (which would be O(N^2)). Call trim_engagement_log() once
         # after all comments in a cycle are posted.
 
     def trim_engagement_log(self) -> None:

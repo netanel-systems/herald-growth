@@ -24,6 +24,7 @@ from growth.browser import BrowserError, BrowserLoginRequired, DevToBrowser
 from growth.client import DevToClient, DevToError
 from growth.config import GrowthConfig, load_config
 from growth.learner import GrowthLearner
+from growth.schema import build_engagement_entry, generate_cycle_id
 from growth.scout import ArticleScout
 from growth.storage import load_json_ids, save_json_ids
 
@@ -103,19 +104,34 @@ class ReactionEngine:
         """Load article IDs we already commented on (for filtering)."""
         return load_json_ids(self.data_dir / "commented.json")
 
-    def log_engagement(self, action: str, article: dict, details: dict) -> None:
-        """Append to engagement_log.jsonl — full audit trail."""
+    def log_engagement(
+        self,
+        action: str,
+        article: dict,
+        details: dict,
+        cycle_id: str | None = None,
+    ) -> None:
+        """Append to engagement_log.jsonl with enhanced X1 schema."""
         path = self.data_dir / "engagement_log.jsonl"
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "action": action,
-            "article_id": article.get("id"),
-            "article_title": article.get("title", "")[:100],
-            "author": article.get("user", {}).get("username", ""),
-            "tags": [t.get("name", t) if isinstance(t, dict) else t for t in article.get("tag_list", article.get("tags", []))],
+        user = article.get("user", {})
+        entry = build_engagement_entry(
+            action=action,
+            platform="devto",
+            target_username=user.get("username", ""),
+            target_post_id=str(article.get("id", "")),
+            target_followers_at_engagement=None,  # Populated when scout targeting ships
+            target_post_reactions_at_engagement=article.get("public_reactions_count",
+                                                            article.get("positive_reactions_count")),
+            target_post_age_hours=None,
+            cycle_id=cycle_id,
+            # Existing fields preserved
+            article_id=article.get("id"),
+            article_title=article.get("title", "")[:100],
+            author_username=user.get("username", ""),
+            tags=[t.get("name", t) if isinstance(t, dict) else t for t in article.get("tag_list", article.get("tags", []))],
             **details,
-        }
+        )
         with open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
 
@@ -229,6 +245,7 @@ class ReactionEngine:
         """
         logger.info("=== Reaction cycle starting (browser=%s) ===", self.config.use_browser)
         start = time.time()
+        cycle_id = generate_cycle_id()
 
         try:
             reacted_ids = self.load_reacted_ids()
@@ -300,7 +317,7 @@ class ReactionEngine:
                     self.log_engagement("reaction", article, {
                         "category": category,
                         "method": "browser" if self.config.use_browser else "api",
-                    })
+                    }, cycle_id=cycle_id)
                 else:
                     failed_count += 1
                     if rate_limited:
