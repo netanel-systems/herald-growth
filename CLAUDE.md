@@ -239,7 +239,7 @@ webdev, javascript, devops, productivity, architecture, opensource, career, disc
 | `~/.nathan/teams/herald_growth/MEMORY.md` | What we know |
 | `~/.nathan/teams/herald_growth/DOS.md` | Pre-flight checklist |
 | `~/.nathan/teams/herald_growth/VIOLATIONS.md` | Accountability |
-| `~/.nathan/teams/herald_growth/REWARDS.md` | Points tracking |
+| `~/.nathan/teams/herald_growth/REWARDS.md` | Points tracking. **Scoring: Success = +10 | Failure or redo = -100.** |
 | `~/.nathan/teams/herald_growth/UNKNOWNS.md` | Open questions |
 | `~/.nathan/teams/herald_growth/state.json` | Session state |
 | `~/.nathan/teams/herald_growth/knowledge/comment-style-guide.md` | Comment rules |
