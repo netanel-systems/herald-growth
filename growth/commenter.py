@@ -196,16 +196,16 @@ class CommentEngine:
             logger.warning("Empty comment rejected.")
             return False
 
-        # Must be short (1-2 sentences, roughly under 280 chars)
-        if len(body) > 280:
-            logger.warning("Comment too long (%d chars). Max 280.", len(body))
+        # Must be short (2-4 sentences, roughly under 600 chars; D4 upgrade)
+        if len(body) > 600:
+            logger.warning("Comment too long (%d chars). Max 600.", len(body))
             return False
 
-        # Must be 1-2 sentences
+        # Must be 2-4 sentences (D4: content-aware comments need more room)
         # Use lookbehind to avoid splitting on abbreviations (e.g. "Dr. Smith")
         sentences = [s for s in re.split(r'(?<=[.!?])\s+', body) if s.strip()]
-        if not (1 <= len(sentences) <= 2):
-            logger.warning("Comment must be 1-2 sentences (found %d).", len(sentences))
+        if not (1 <= len(sentences) <= 4):
+            logger.warning("Comment must be 1-4 sentences (found %d).", len(sentences))
             return False
 
         # Must not contain multiple paragraphs

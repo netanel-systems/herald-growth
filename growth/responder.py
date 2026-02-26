@@ -27,6 +27,7 @@ from pathlib import Path
 from growth.browser import BrowserLoginRequired, DevToBrowser
 from growth.client import DevToClient, DevToError
 from growth.config import GrowthConfig
+from growth.engagement_state import EngagementState
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,14 @@ class OwnPostResponder:
         self.browser = browser
         self.llm_reply_fn = llm_reply_fn
         self.data_dir: Path = config.abs_data_dir
+        self._engagement_state: EngagementState | None = None
+
+    @property
+    def engagement_state(self) -> EngagementState:
+        """Lazy-init engagement state (D5)."""
+        if self._engagement_state is None:
+            self._engagement_state = EngagementState(self.data_dir)
+        return self._engagement_state
 
     # ── Storage ────────────────────────────────────────────────────────────
 
@@ -387,6 +396,18 @@ class OwnPostResponder:
                     "Processing comment %s on article '%s' by @%s",
                     comment_id_code, article_title[:50], commenter_username,
                 )
+
+                # Record target reply in engagement state (D5):
+                # When someone comments on our own post, treat it as a reply
+                # signal if we previously engaged with their content.
+                if commenter_username:
+                    try:
+                        self.engagement_state.record_target_reply(commenter_username)
+                    except Exception as es_exc:
+                        logger.warning(
+                            "EngagementState.record_target_reply failed for @%s: %s",
+                            commenter_username, es_exc,
+                        )
 
                 # Step 1: Like the comment via browser automation
                 liked = self.like_comment_via_browser(comment_id_code, article_url)

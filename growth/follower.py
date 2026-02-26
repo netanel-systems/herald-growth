@@ -19,6 +19,7 @@ from pathlib import Path
 
 from growth.browser import BrowserLoginRequired, DevToBrowser
 from growth.config import GrowthConfig
+from growth.engagement_state import EngagementState
 from growth.schema import build_engagement_entry, generate_cycle_id
 from growth.storage import load_json_ids, save_json_ids
 
@@ -40,10 +41,19 @@ class FollowEngine:
         self,
         config: GrowthConfig,
         browser: DevToBrowser,
+        engagement_state: EngagementState | None = None,
     ) -> None:
         self.config = config
         self.browser = browser
         self.data_dir = config.abs_data_dir
+        self._engagement_state = engagement_state
+
+    @property
+    def engagement_state(self) -> EngagementState:
+        """Lazy-init engagement state (D5)."""
+        if self._engagement_state is None:
+            self._engagement_state = EngagementState(self.data_dir)
+        return self._engagement_state
 
     def load_followed_usernames(self) -> set[str]:
         """Load usernames we already followed from followed.json.
@@ -218,6 +228,14 @@ class FollowEngine:
                 skipped_count += 1
                 continue
 
+            # Engagement state check (D5): only follow if target has replied
+            try:
+                if not self.engagement_state.should_follow(username):
+                    skipped_count += 1
+                    continue
+            except Exception as es_exc:
+                logger.warning("EngagementState.should_follow failed: %s", es_exc)
+
             # Attempt follow
             try:
                 success = self.follow_user(username)
@@ -233,6 +251,11 @@ class FollowEngine:
                 followed_count += 1
                 followed_usernames.add(username)
                 self._log_engagement(username, cycle_id=cycle_id)
+                # Record in engagement state (D5)
+                try:
+                    self.engagement_state.record_follow(username)
+                except Exception as es_exc:
+                    logger.warning("EngagementState.record_follow failed: %s", es_exc)
                 logger.info("Followed @%s.", username)
             else:
                 failed_count += 1

@@ -23,6 +23,7 @@ from pathlib import Path
 from growth.browser import BrowserError, BrowserLoginRequired, DevToBrowser
 from growth.client import DevToClient, DevToError
 from growth.config import GrowthConfig, load_config
+from growth.engagement_state import EngagementState
 from growth.learner import GrowthLearner
 from growth.schema import build_engagement_entry, generate_cycle_id
 from growth.scout import ArticleScout
@@ -88,6 +89,14 @@ class ReactionEngine:
         self.scout = ArticleScout(self.client, config)
         self.data_dir = config.abs_data_dir
         self._browser: DevToBrowser | None = None
+        self._engagement_state: EngagementState | None = None
+
+    @property
+    def engagement_state(self) -> EngagementState:
+        """Lazy-init engagement state (D5)."""
+        if self._engagement_state is None:
+            self._engagement_state = EngagementState(self.data_dir)
+        return self._engagement_state
 
     def load_reacted_ids(self) -> set[int]:
         """Load article IDs we already reacted to."""
@@ -329,6 +338,11 @@ class ReactionEngine:
                         author_engagement_count[author_username] = (
                             author_engagement_count.get(author_username, 0) + 1
                         )
+                        # Record like in engagement state (D5)
+                        try:
+                            self.engagement_state.record_like(author_username)
+                        except Exception as es_exc:
+                            logger.warning("EngagementState.record_like failed: %s", es_exc)
                     self.log_engagement("reaction", article, {
                         "category": category,
                         "method": "browser" if self.config.use_browser else "api",
