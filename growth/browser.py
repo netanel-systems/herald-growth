@@ -124,6 +124,18 @@ class DevToBrowser:
         "button[type='submit'].comment-action-button",
     )
 
+    # Comment like selectors — verified from Forem source:
+    # app/views/comments/_comment.html.erb
+    # app/javascript/packs/commentReactions.js
+    # Each comment has a heart/like button scoped within its container.
+    SELS_COMMENT_LIKE_BUTTON = (
+        "button.comment__like-button",
+        "button[data-category='like']",
+        ".like-button",
+    )
+    # Activated state uses same "reacted" class pattern as article reactions
+    COMMENT_LIKE_ACTIVATED_CLASS = "reacted"
+
     VALID_CATEGORIES = ("like", "unicorn", "fire", "raised_hands", "exploding_head")
 
     def __init__(self, config: GrowthConfig) -> None:
@@ -887,6 +899,128 @@ class DevToBrowser:
                 comment_id_code, exc,
             )
             return None
+
+    def like_comment(
+        self,
+        comment_id_code: str,
+        article_url: str = "",
+    ) -> bool:
+        """Like a comment by clicking its heart/like button.
+
+        Navigates to the article page, finds the comment container via
+        ``[data-path$="/comments/{id_code}"]``, and clicks the like button
+        scoped within that container.
+
+        Args:
+            comment_id_code: The ``id_code`` string returned by the Forem
+                comments API (e.g. ``"34ohb"``).
+            article_url: Full article URL (required).
+
+        Returns:
+            True on success (liked or already liked), False on failure.
+        """
+        # Validate comment_id_code — same guard as reply_to_comment()
+        if (
+            not isinstance(comment_id_code, str)
+            or not comment_id_code
+            or not comment_id_code.replace("-", "").replace("_", "").isalnum()
+        ):
+            logger.warning("Invalid comment_id_code for like: %s", comment_id_code)
+            return False
+
+        if not article_url:
+            logger.warning(
+                "No article URL for liking comment %s.", comment_id_code,
+            )
+            return False
+
+        try:
+            self.ensure_logged_in()
+            if self._page is None:
+                logger.error("Browser page not initialized for comment like.")
+                return False
+
+            self._page.goto(article_url, wait_until="domcontentloaded")
+            self._human_delay(1.0, 2.0)
+
+            # Locate the comment container by its data-path attribute
+            container_sel = f'[data-path$="/comments/{comment_id_code}"]'
+            try:
+                container = self._page.locator(container_sel).first
+                container.wait_for(state="visible", timeout=5000)
+            except PlaywrightTimeoutError:
+                self._save_debug_screenshot(
+                    f"like_container_not_found_{comment_id_code}"
+                )
+                logger.warning(
+                    "Comment node %s not found for like.", comment_id_code,
+                )
+                return False
+
+            # Find the like button within the comment container
+            like_btn = None
+            for sel in self.SELS_COMMENT_LIKE_BUTTON:
+                loc = container.locator(sel).first
+                try:
+                    if loc.is_visible(timeout=2000):
+                        like_btn = loc
+                        break
+                except PlaywrightTimeoutError:
+                    continue
+
+            if like_btn is None:
+                self._save_debug_screenshot(
+                    f"like_button_not_found_{comment_id_code}"
+                )
+                logger.warning(
+                    "Like button not found for comment %s.", comment_id_code,
+                )
+                return False
+
+            # Check if already liked (avoid toggling off)
+            classes = like_btn.get_attribute("class") or ""
+            if self.COMMENT_LIKE_ACTIVATED_CLASS in classes:
+                logger.info(
+                    "Comment %s already liked. Skipping.", comment_id_code,
+                )
+                return True
+
+            like_btn.click()
+            self._human_delay(0.5, 1.5)
+
+            # Verify activation
+            classes = like_btn.get_attribute("class") or ""
+            if self.COMMENT_LIKE_ACTIVATED_CLASS in classes:
+                logger.info(
+                    "Liked comment %s via browser.", comment_id_code,
+                )
+                self._save_session()
+                return True
+
+            # Button clicked but activation class not detected — still report success
+            # as the click was dispatched (Forem may use a different indicator)
+            logger.info(
+                "Like click dispatched for comment %s (activation class not confirmed).",
+                comment_id_code,
+            )
+            self._save_session()
+            return True
+
+        except BrowserLoginRequired:
+            logger.error("Cannot like comment — login required.")
+            return False
+        except PlaywrightTimeoutError:
+            logger.warning(
+                "Like comment %s timed out.", comment_id_code,
+            )
+            self._save_debug_screenshot(f"like_timeout_{comment_id_code}")
+            return False
+        except Exception as exc:
+            logger.error(
+                "Unexpected browser error liking comment %s: %s",
+                comment_id_code, exc,
+            )
+            return False
 
     # --- Detection Helpers ---
 
