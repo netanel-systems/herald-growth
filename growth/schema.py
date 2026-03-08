@@ -9,26 +9,42 @@ existing log entries. Existing fields are preserved as-is.
 Schema version: X1 (GitLab #14)
 """
 
+import uuid
 from datetime import datetime, timezone
-
-# Module-level cycle counter. Resets each process invocation.
-_cycle_counter: int = 0
-_cycle_date: str = ""
 
 
 def generate_cycle_id() -> str:
-    """Generate a cycle identifier in format YYYY-MM-DD-cycle-N.
+    """Generate a globally unique cycle identifier.
 
-    Increments N each time this function is called within the same UTC day.
-    Resets to 1 when the UTC date changes or on process restart.
+    Format: YYYY-MM-DD-<8-char-uuid-fragment>
+
+    Uses a UUID fragment instead of a process-local counter so that two
+    cron runs on the same UTC date never produce the same cycle_id.  The
+    old YYYY-MM-DD-cycle-N scheme reset its counter on every invocation,
+    causing collisions in attribution and A/B grouping whenever more than
+    one run appended to the same engagement log on the same day.
     """
-    global _cycle_counter, _cycle_date
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if today != _cycle_date:
-        _cycle_date = today
-        _cycle_counter = 0
-    _cycle_counter += 1
-    return f"{today}-cycle-{_cycle_counter}"
+    uid = uuid.uuid4().hex[:8]
+    return f"{today}-{uid}"
+
+
+# Reserved keys that callers must not overwrite via **extras.
+# These fields define the canonical schema shape; silently clobbering them
+# would corrupt attribution, A/B grouping, and weekly reporting.
+_RESERVED_KEYS = frozenset({
+    "timestamp",
+    "platform",
+    "action",
+    "target_username",
+    "target_post_id",
+    "target_followers_at_engagement",
+    "target_post_reactions_at_engagement",
+    "target_post_age_hours",
+    "comment_template_category",
+    "comment_has_question",
+    "cycle_id",
+})
 
 
 def build_engagement_entry(
@@ -65,12 +81,23 @@ def build_engagement_entry(
             generation. None for non-comment actions.
         comment_has_question: Whether the comment contains a question.
             None for non-comment actions.
-        cycle_id: Cycle identifier (YYYY-MM-DD-cycle-N).
+        cycle_id: Cycle identifier (YYYY-MM-DD-<uuid-fragment>).
         **extras: Any additional platform-specific fields to include.
+            Reserved canonical keys are rejected to prevent silent corruption.
 
     Returns:
         Dict ready for JSON serialization and appending to engagement_log.jsonl.
+
+    Raises:
+        ValueError: If any key in extras collides with a reserved canonical field.
     """
+    collisions = _RESERVED_KEYS & extras.keys()
+    if collisions:
+        raise ValueError(
+            f"build_engagement_entry: extras must not override reserved fields: "
+            f"{sorted(collisions)}"
+        )
+
     entry: dict = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "platform": platform,

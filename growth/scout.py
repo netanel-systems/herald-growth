@@ -299,11 +299,16 @@ class ArticleScout:
                 filtered.append(article)
                 continue
 
-            # Not all profiles have a direct follower_count field.
-            # The user endpoint returns a flat dict; check common field names.
-            follower_count = profile.get("public_reactions_count", 0)
-            # dev.to user profile doesn't directly expose follower count in API,
-            # but we can use profile presence as a proxy. Pass through if unknown.
+            # dev.to's user endpoint does not expose a direct follower_count field
+            # for regular users.  We use `followers_count` when present (some Forem
+            # instances surface it) and fall back to None — meaning unknown.
+            # When the count is unknown we let the article through (defensive).
+            # `public_reactions_count` is a reaction metric, not a follower count,
+            # and must not be used as a follower proxy.
+            follower_count: int | None = profile.get("followers_count")
+            if follower_count is not None and follower_count > max_followers:
+                skipped_count += 1
+                continue
             filtered.append(article)
 
         if skipped_count:
@@ -349,10 +354,16 @@ class ArticleScout:
     def sort_by_priority(self, articles: list[dict]) -> list[dict]:
         """Sort articles by engagement priority (D1).
 
-        Priority: newer posts first, lower reaction count first
-        (under-engaged content has highest reciprocity potential).
+        Niche score (ascending = higher priority):
+          0 — primary-cluster tag match
+          1 — secondary-cluster tag match only
+          2 — unrelated tags or no tags
+
+        Within each niche tier: lower reaction count first, then newer
+        posts first (under-engaged content has highest reciprocity potential).
         """
         primary_set = set(NICHE_CLUSTERS_PRIMARY)
+        secondary_set = set(NICHE_CLUSTERS_SECONDARY)
 
         def _priority_key(article: dict) -> tuple:
             reactions = article.get("positive_reactions_count", 0)
@@ -368,7 +379,10 @@ class ArticleScout:
 
             if tag_names & primary_set:
                 niche_score = 0
-            elif tag_names:
+            elif tag_names & secondary_set:
+                # Only secondary-cluster matches get middle priority.
+                # Articles with unrelated tags get the same low priority as
+                # untagged articles so they do not dilute niche-first ordering.
                 niche_score = 1
             else:
                 niche_score = 2

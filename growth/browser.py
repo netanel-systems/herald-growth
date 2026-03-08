@@ -312,10 +312,12 @@ class DevToBrowser:
             return False
 
     # Fallback selectors for logged-in detection (meta tag may not exist on all pages)
+    # NOTE: 'button[aria-label="Navigation menu"]' is intentionally excluded — it
+    # exists on the anonymous dev.to homepage and produces a false positive that
+    # bypasses ensure_logged_in() for all write operations.
     SELS_LOGGED_IN_FALLBACK = (
         'meta[name="user-signed-in"][content="true"]',
         'a[href="/new"]',              # "Create Post" link (only visible when logged in)
-        'button[aria-label="Navigation menu"]',  # Mobile nav (logged-in)
         'a[href="/notifications"]',    # Notifications bell
         'img.crayons-avatar',          # User avatar in nav
     )
@@ -997,14 +999,16 @@ class DevToBrowser:
                 self._save_session()
                 return True
 
-            # Button clicked but activation class not detected — still report success
-            # as the click was dispatched (Forem may use a different indicator)
-            logger.info(
-                "Like click dispatched for comment %s (activation class not confirmed).",
+            # Button clicked but activation class not detected — return False.
+            # Unknown outcome must not be treated as success: the click may have
+            # been intercepted, throttled, or aimed at the wrong element.
+            # The caller will not mark the comment as liked, allowing future retry.
+            logger.warning(
+                "Like click dispatched for comment %s but activation class not confirmed. "
+                "Treating as failure to allow retry.",
                 comment_id_code,
             )
-            self._save_session()
-            return True
+            return False
 
         except BrowserLoginRequired:
             logger.error("Cannot like comment — login required.")

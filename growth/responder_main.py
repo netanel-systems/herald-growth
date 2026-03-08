@@ -32,6 +32,9 @@ Their comment: {comment_body}
 Write only the reply text. No explanation."""
 
 
+_REPLY_MAX_CHARS = 250
+
+
 def make_llm_fn(client: anthropic.Anthropic):
     def llm_reply_fn(comment_body: str, article_title: str) -> str:
         prompt = REPLY_PROMPT.format(
@@ -43,7 +46,17 @@ def make_llm_fn(client: anthropic.Anthropic):
             max_tokens=150,
             messages=[{"role": "user", "content": prompt}],
         )
-        return message.content[0].text.strip()
+        reply = message.content[0].text.strip()
+        # Hard-cap at _REPLY_MAX_CHARS regardless of what the model returned.
+        # The prompt says "under 250 characters" but we cannot rely on the model
+        # to enforce that contract — normalise here before the text reaches dev.to.
+        if len(reply) > _REPLY_MAX_CHARS:
+            logger.warning(
+                "LLM reply exceeded %d chars (%d). Truncating.",
+                _REPLY_MAX_CHARS, len(reply),
+            )
+            reply = reply[:_REPLY_MAX_CHARS].rsplit(" ", 1)[0]
+        return reply
     return llm_reply_fn
 
 

@@ -164,12 +164,16 @@ def test_playwright_timeout_returns_false(browser: DevToBrowser) -> None:
 
 # -- Test 9: Click dispatched but activation class not confirmed --
 
-def test_like_click_without_activation_class_still_returns_true(
+def test_like_click_without_activation_class_returns_false(
     browser: DevToBrowser,
 ) -> None:
-    """If click dispatched but Forem uses a different indicator, still True."""
+    """Click dispatched but activation class absent returns False to allow retry.
+
+    Previously this case returned True, but that masked throttled/intercepted
+    clicks and prevented future retries.  Unknown outcome must be False.
+    """
     with patch.object(browser, "ensure_logged_in"):
-        with patch.object(browser, "_save_session"):
+        with patch.object(browser, "_save_session") as mock_save:
             container = _locator(visible=True)
             like_btn = _locator(visible=True, cls="comment__like-button")
 
@@ -181,8 +185,10 @@ def test_like_click_without_activation_class_still_returns_true(
 
             result = browser.like_comment("abc12", "https://dev.to/a/b")
 
-    assert result is True
+    assert result is False
     like_btn.click.assert_called_once()
+    # _save_session must NOT be called when the outcome is unknown
+    mock_save.assert_not_called()
 
 
 # -- Test 10: Valid alphanumeric id_codes with dashes/underscores --

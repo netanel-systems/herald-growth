@@ -45,6 +45,10 @@ def _load_engagement_log(data_dir: Path, lookback_days: int) -> list[dict]:
                     ts = entry.get("timestamp", "")
                     if ts:
                         entry_time = datetime.fromisoformat(ts)
+                        # Normalize to UTC so naive datetimes (no offset) can be
+                        # compared against the UTC cutoff without a TypeError.
+                        if entry_time.tzinfo is None:
+                            entry_time = entry_time.replace(tzinfo=timezone.utc)
                         if entry_time >= cutoff:
                             entries.append(entry)
                 except (json.JSONDecodeError, ValueError):
@@ -53,6 +57,53 @@ def _load_engagement_log(data_dir: Path, lookback_days: int) -> list[dict]:
         logger.warning("Failed to read engagement_log.jsonl: %s", e)
 
     return entries
+
+
+def _load_follower_snapshots(data_dir: Path) -> list[dict]:
+    """Load all follower snapshots, sorted oldest-first.
+
+    Each snapshot has at minimum a 'timestamp' and 'usernames' field
+    (set by tracker.py _save_snapshot).
+
+    Args:
+        data_dir: Absolute path to data directory.
+
+    Returns:
+        List of snapshot dicts sorted by timestamp ascending. Empty list if
+        no snapshots exist or the file cannot be read.
+    """
+    path = data_dir / "follower_snapshots.jsonl"
+    if not path.exists():
+        return []
+
+    snapshots: list[dict] = []
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    snap = json.loads(line)
+                    snapshots.append(snap)
+                except json.JSONDecodeError:
+                    continue
+    except OSError as e:
+        logger.warning("Failed to load follower snapshots: %s", e)
+        return []
+
+    def _snap_ts(s: dict) -> datetime:
+        ts = s.get("timestamp", "")
+        try:
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (ValueError, TypeError):
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+    snapshots.sort(key=_snap_ts)
+    return snapshots
 
 
 def _load_follower_usernames(data_dir: Path) -> set[str]:
@@ -67,22 +118,9 @@ def _load_follower_usernames(data_dir: Path) -> set[str]:
     Returns:
         Set of follower username strings. Empty set if no snapshot.
     """
-    path = data_dir / "follower_snapshots.jsonl"
-    if not path.exists():
-        return set()
-
-    try:
-        last_line = ""
-        with open(path) as f:
-            for line in f:
-                if line.strip():
-                    last_line = line.strip()
-        if last_line:
-            snapshot = json.loads(last_line)
-            return set(snapshot.get("usernames", []))
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning("Failed to load follower snapshot: %s", e)
-
+    snapshots = _load_follower_snapshots(data_dir)
+    if snapshots:
+        return set(snapshots[-1].get("usernames", []))
     return set()
 
 
@@ -126,8 +164,20 @@ def attribute_follow(
             "touch_count": 0,
         }
 
-    # Sort by timestamp (oldest first) for first-touch attribution
-    matches.sort(key=lambda e: e.get("timestamp", ""))
+    # Sort by timestamp (oldest first) for first-touch attribution.
+    # Parse to datetime so mixed ISO-8601 forms (with/without offset) sort
+    # correctly instead of relying on lexicographic string ordering.
+    def _parse_ts(e: dict) -> datetime:
+        ts = e.get("timestamp", "")
+        try:
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (ValueError, TypeError):
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+    matches.sort(key=_parse_ts)
 
     return {
         "attributed": True,
@@ -141,7 +191,14 @@ def attribute_follow(
 def calculate_fbr(data_dir: Path, lookback_days: int = 7) -> dict:
     """Calculate Follow-Back Rate (FBR).
 
-    FBR = (attributed followers / total unique users engaged) * 100
+    FBR = (new followers gained during lookback window who we engaged with
+           / total unique users we engaged with during the window) * 100
+
+    Uses follower *deltas* rather than the latest snapshot so that users
+    who were already following before the lookback window are not counted
+    as follow-backs.  A baseline snapshot is determined as the last snapshot
+    recorded before the window start; any username present in the current
+    snapshot but absent in the baseline is treated as a new follower.
 
     Args:
         data_dir: Absolute path to data directory.
@@ -150,14 +207,41 @@ def calculate_fbr(data_dir: Path, lookback_days: int = 7) -> dict:
     Returns:
         Dict with:
         - fbr_percent: float (0-100)
-        - attributed_followers: int
+        - attributed_followers: int (engaged users who newly followed back)
         - total_engaged_users: int
-        - current_followers: int
+        - current_followers: int (total followers right now)
     """
     entries = _load_engagement_log(data_dir, lookback_days)
-    follower_usernames = _load_follower_usernames(data_dir)
+    snapshots = _load_follower_snapshots(data_dir)
 
-    # Get unique usernames we engaged with
+    window_start = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+
+    # Determine baseline: last snapshot recorded before the window start.
+    # Any snapshot within or after the window is part of the "current" view.
+    baseline_usernames: set[str] = set()
+    current_usernames: set[str] = set()
+
+    if snapshots:
+        def _snap_ts(s: dict) -> datetime:
+            ts = s.get("timestamp", "")
+            try:
+                dt = datetime.fromisoformat(ts)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except (ValueError, TypeError):
+                return datetime.min.replace(tzinfo=timezone.utc)
+
+        pre_window = [s for s in snapshots if _snap_ts(s) < window_start]
+        if pre_window:
+            baseline_usernames = {u.lower() for u in pre_window[-1].get("usernames", [])}
+
+        current_usernames = {u.lower() for u in snapshots[-1].get("usernames", [])}
+
+    # New followers = in current snapshot but NOT in baseline
+    new_followers = current_usernames - baseline_usernames
+
+    # Get unique usernames we engaged with during the window
     engaged_users: set[str] = set()
     for entry in entries:
         username = entry.get("author_username", "")
@@ -169,23 +253,24 @@ def calculate_fbr(data_dir: Path, lookback_days: int = 7) -> dict:
             "fbr_percent": 0.0,
             "attributed_followers": 0,
             "total_engaged_users": 0,
-            "current_followers": len(follower_usernames),
+            "current_followers": len(current_usernames),
         }
 
-    # Count how many engaged users are now our followers
-    follower_usernames_lower = {u.lower() for u in follower_usernames}
-    attributed = engaged_users & follower_usernames_lower
+    # Count engaged users who are also new followers (delta-based)
+    attributed = engaged_users & new_followers
 
     fbr = (len(attributed) / len(engaged_users)) * 100
 
     logger.info(
-        "FBR: %.1f%% (%d/%d engaged users followed back). Total followers: %d.",
-        fbr, len(attributed), len(engaged_users), len(follower_usernames),
+        "FBR: %.1f%% (%d/%d engaged users followed back). "
+        "New followers this window: %d. Total followers: %d.",
+        fbr, len(attributed), len(engaged_users),
+        len(new_followers), len(current_usernames),
     )
 
     return {
         "fbr_percent": round(fbr, 2),
         "attributed_followers": len(attributed),
         "total_engaged_users": len(engaged_users),
-        "current_followers": len(follower_usernames),
+        "current_followers": len(current_usernames),
     }

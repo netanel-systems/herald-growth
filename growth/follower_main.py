@@ -10,8 +10,10 @@ Usage:
     python -m growth.follower_main
 """
 
+import importlib.util
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,13 +24,40 @@ from growth.config import load_config
 from growth.follower import FollowEngine
 from growth.scout import ArticleScout
 
-sys.path.insert(0, str(Path.home() / "netanel" / ".nathan" / "scripts"))
-from atomic_state import atomic_write_state, read_state_safe  # noqa: E402
-
 logger = logging.getLogger(__name__)
 
-STATE_PATH = str(
-    Path.home() / "netanel" / ".nathan" / "teams" / "herald_growth" / "state.json"
+# ---------------------------------------------------------------------------
+# atomic_state: internal shared utility (not an installable package).
+# Derive the scripts directory from NATHAN_SCRIPTS_DIR env var so this works
+# in CI/containers without coupling the code to a specific machine layout.
+# Falls back to the conventional home-directory path if the env var is unset.
+# ---------------------------------------------------------------------------
+_SCRIPTS_DIR = Path(
+    os.environ.get(
+        "NATHAN_SCRIPTS_DIR",
+        str(Path.home() / "netanel" / ".nathan" / "scripts"),
+    )
+)
+_ATOMIC_STATE_PATH = _SCRIPTS_DIR / "atomic_state.py"
+
+if not _ATOMIC_STATE_PATH.exists():
+    raise ImportError(
+        f"atomic_state module not found at {_ATOMIC_STATE_PATH}. "
+        "Set NATHAN_SCRIPTS_DIR to the directory containing atomic_state.py."
+    )
+
+_spec = importlib.util.spec_from_file_location("atomic_state", _ATOMIC_STATE_PATH)
+if _spec is None or _spec.loader is None:
+    raise ImportError(f"Cannot load atomic_state from {_ATOMIC_STATE_PATH}")
+_atomic_state_mod = importlib.util.module_from_spec(_spec)
+sys.modules["atomic_state"] = _atomic_state_mod
+_spec.loader.exec_module(_atomic_state_mod)  # type: ignore[union-attr]
+atomic_write_state = _atomic_state_mod.atomic_write_state
+read_state_safe = _atomic_state_mod.read_state_safe
+
+STATE_PATH = os.environ.get(
+    "GROWTH_STATE_PATH",
+    str(Path.home() / "netanel" / ".nathan" / "teams" / "herald_growth" / "state.json"),
 )
 
 

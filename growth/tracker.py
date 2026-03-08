@@ -181,11 +181,15 @@ class GrowthTracker:
         except OSError as e:
             logger.warning("Failed to read engagement log for stats: %s", e)
 
-        reply_rate = (questions_count / total_comments_for_question * 100) if total_comments_for_question > 0 else 0.0
+        # `question_rate` measures how often we include a question in our comments.
+        # It is NOT a reply rate (replies received cannot be computed from our
+        # own engagement log).  The field has been renamed to prevent confusion
+        # in dashboards and weekly reports.
+        question_rate = (questions_count / total_comments_for_question * 100) if total_comments_for_question > 0 else 0.0
 
         return {
             "volume": {"reactions": reactions, "comments": comments, "follows": follows},
-            "reply_rate": round(reply_rate, 1),
+            "question_rate": round(question_rate, 1),
             "template_distribution": template_counts,
             "targeting": {
                 "avg_target_followers": round(sum(target_followers_list) / len(target_followers_list), 1) if target_followers_list else None,

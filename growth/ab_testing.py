@@ -83,6 +83,28 @@ def fishers_exact_test(
             "error": "insufficient_data",
         }
 
+    # Validate that success counts are non-negative and do not exceed totals.
+    # Negative values or successes > total produce negative cell counts in the
+    # contingency table which turns bad input into a silent runtime failure.
+    if control_successes < 0 or control_successes > control_total:
+        return {
+            "p_value": 1.0,
+            "significant": False,
+            "control_rate": 0.0,
+            "variant_rate": 0.0,
+            "lift_percent": 0.0,
+            "error": "invalid_control_successes",
+        }
+    if variant_successes < 0 or variant_successes > variant_total:
+        return {
+            "p_value": 1.0,
+            "significant": False,
+            "control_rate": 0.0,
+            "variant_rate": 0.0,
+            "lift_percent": 0.0,
+            "error": "invalid_variant_successes",
+        }
+
     control_rate = control_successes / control_total
     variant_rate = variant_successes / variant_total
     lift = ((variant_rate - control_rate) / control_rate * 100) if control_rate > 0 else 0.0
@@ -101,8 +123,12 @@ def fishers_exact_test(
             - _log_factorial(b) - _log_factorial(c) - _log_factorial(d)
         )
 
-    observed_log_p = _log_p_table(a, b, c, d)
-
+    # One-tailed Fisher's exact test: variant > control.
+    # We enumerate all tables with the same marginal totals and accumulate
+    # those where control_successes (a_i) is <= observed a.  This captures
+    # every outcome at least as extreme as observed in the direction where
+    # the variant wins.  The two-sided rule (log_p <= observed_log_p) was
+    # wrong here: it could flag a sharply worse variant as significant.
     p_value = 0.0
     row1_total = a + b
     row2_total = c + d
@@ -117,8 +143,9 @@ def fishers_exact_test(
         d_i = row2_total - c_i
         if b_i < 0 or c_i < 0 or d_i < 0:
             continue
-        log_p = _log_p_table(a_i, b_i, c_i, d_i)
-        if log_p <= observed_log_p + 1e-10:
+        # Include tables where control_successes <= observed (variant >= observed)
+        if a_i <= a:
+            log_p = _log_p_table(a_i, b_i, c_i, d_i)
             p_value += math.exp(log_p)
 
     p_value = min(p_value, 1.0)
