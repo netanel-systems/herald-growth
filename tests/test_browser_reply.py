@@ -44,7 +44,7 @@ def _locator(*, visible: bool = True, timeout: bool = False, value: str = "") ->
 
 def test_no_article_url_returns_none(browser: DevToBrowser) -> None:
     """Empty article_url returns None without touching the page."""
-    result = browser.reply_to_comment(123, "Nice post!", "")
+    result = browser.reply_to_comment("abc12", "Nice post!", "")
     assert result is None
     browser._page.goto.assert_not_called()
 
@@ -52,12 +52,12 @@ def test_no_article_url_returns_none(browser: DevToBrowser) -> None:
 # ── Test 2: Comment node not found ────────────────────────────────
 
 def test_comment_node_not_found_returns_none(browser: DevToBrowser) -> None:
-    """Missing #comment-node-{id} returns None."""
+    """Missing comment container returns None."""
     with patch.object(browser, "ensure_logged_in"):
         container = _locator(timeout=True)  # wait_for raises timeout
         browser._page.locator.return_value = container
 
-        result = browser.reply_to_comment(123, "Nice!", "https://dev.to/a/b")
+        result = browser.reply_to_comment("abc12", "Nice!", "https://dev.to/a/b")
 
     assert result is None
 
@@ -72,7 +72,7 @@ def test_reply_button_not_found_returns_none(browser: DevToBrowser) -> None:
         container.locator.return_value = _locator(visible=False)
         browser._page.locator.return_value = container
 
-        result = browser.reply_to_comment(123, "Nice!", "https://dev.to/a/b")
+        result = browser.reply_to_comment("abc12", "Nice!", "https://dev.to/a/b")
 
     assert result is None
 
@@ -94,13 +94,13 @@ def test_textarea_not_found_returns_none(browser: DevToBrowser) -> None:
         container.locator.side_effect = container_loc
 
         def page_loc(sel: str) -> MagicMock:
-            if "comment-node" in sel:
+            if "data-path" in sel:
                 return container
-            return invisible  # textarea#textarea-for-123 not found
+            return invisible
 
         browser._page.locator.side_effect = page_loc
 
-        result = browser.reply_to_comment(123, "Nice!", "https://dev.to/a/b")
+        result = browser.reply_to_comment("abc12", "Nice!", "https://dev.to/a/b")
 
     assert result is None
 
@@ -129,31 +129,30 @@ def test_successful_reply_returns_dict(browser: DevToBrowser) -> None:
             container.locator.side_effect = container_loc
 
             def page_loc(sel: str) -> MagicMock:
-                if "comment-node" in sel:
+                if "data-path" in sel:
                     return container
-                if "textarea-for" in sel:
-                    return textarea
                 return _locator(visible=False)
 
             browser._page.locator.side_effect = page_loc
             browser._page.get_by_text.return_value = verified_text
 
-            result = browser.reply_to_comment(123, "Nice post!", "https://dev.to/a/b")
+            result = browser.reply_to_comment("abc12", "Nice post!", "https://dev.to/a/b")
 
     assert result is not None
     assert result["status"] == "replied"
-    assert result["comment_id"] == 123
+    assert result["comment_id_code"] == "abc12"
     assert result["source"] == "browser"
 
 
-# ── Test 6: Invalid comment_id guard ────────────────────────────
+# ── Test 6: Invalid comment_id_code guard ────────────────────────
 
-def test_invalid_comment_id_returns_none(browser: DevToBrowser) -> None:
-    """Non-positive or non-integer comment_id returns None immediately."""
-    assert browser.reply_to_comment(0, "Nice!", "https://dev.to/a/b") is None
-    assert browser.reply_to_comment(-1, "Nice!", "https://dev.to/a/b") is None
-    # Type hint is not enforced at runtime — callers may pass strings
-    assert browser.reply_to_comment("123", "Nice!", "https://dev.to/a/b") is None  # type: ignore[arg-type]
+def test_invalid_comment_id_code_returns_none(browser: DevToBrowser) -> None:
+    """Empty, non-string, or unsafe comment_id_code returns None immediately."""
+    assert browser.reply_to_comment("", "Nice!", "https://dev.to/a/b") is None
+    assert browser.reply_to_comment(123, "Nice!", "https://dev.to/a/b") is None  # type: ignore[arg-type]
+    # CSS-injection characters must be rejected
+    assert browser.reply_to_comment('abc"def', "Nice!", "https://dev.to/a/b") is None
+    assert browser.reply_to_comment("abc def", "Nice!", "https://dev.to/a/b") is None
     browser._page.goto.assert_not_called()
 
 
@@ -179,7 +178,7 @@ def test_submit_button_not_found_returns_none(browser: DevToBrowser) -> None:
         container.locator.side_effect = container_loc
         browser._page.locator.return_value = container
 
-        result = browser.reply_to_comment(123, "Nice!", "https://dev.to/a/b")
+        result = browser.reply_to_comment("abc12", "Nice!", "https://dev.to/a/b")
 
     assert result is None
 
@@ -191,7 +190,7 @@ def test_login_required_returns_none(browser: DevToBrowser) -> None:
     with patch.object(
         browser, "ensure_logged_in", side_effect=BrowserLoginRequired("expired")
     ):
-        result = browser.reply_to_comment(123, "Nice!", "https://dev.to/a/b")
+        result = browser.reply_to_comment("abc12", "Nice!", "https://dev.to/a/b")
 
     assert result is None
 
@@ -203,6 +202,6 @@ def test_playwright_timeout_returns_none(browser: DevToBrowser) -> None:
     with patch.object(browser, "ensure_logged_in"):
         browser._page.goto.side_effect = PlaywrightTimeoutError("nav timeout")
 
-        result = browser.reply_to_comment(123, "Nice!", "https://dev.to/a/b")
+        result = browser.reply_to_comment("abc12", "Nice!", "https://dev.to/a/b")
 
     assert result is None

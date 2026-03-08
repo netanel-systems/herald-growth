@@ -109,8 +109,8 @@ class DevToBrowser:
 
     # Reply-to-comment selectors — verified from Forem source:
     # app/assets/javascripts/utilities/buildCommentHTML.js.erb
-    # app/assets/javascripts/utilities/buildCommentFormHTML.js.erb
-    # All interactions scoped to #comment-node-{id} for precision.
+    # app/views/comments/_comment.html.erb
+    # Container found via [data-path$="/comments/{id_code}"].
     SELS_REPLY_BUTTON = (
         ".toggle-reply-form",
         "button[data-tracking-name='comment_reply_button']",
@@ -123,6 +123,18 @@ class DevToBrowser:
         "button[data-tracking-name='comment_reply_submit_button']",
         "button[type='submit'].comment-action-button",
     )
+
+    # Comment like selectors — verified from Forem source:
+    # app/views/comments/_comment.html.erb
+    # app/javascript/packs/commentReactions.js
+    # Each comment has a heart/like button scoped within its container.
+    SELS_COMMENT_LIKE_BUTTON = (
+        "button.comment__like-button",
+        "button[data-category='like']",
+        ".like-button",
+    )
+    # Activated state uses same "reacted" class pattern as article reactions
+    COMMENT_LIKE_ACTIVATED_CLASS = "reacted"
 
     VALID_CATEGORIES = ("like", "unicorn", "fire", "raised_hands", "exploding_head")
 
@@ -171,7 +183,11 @@ class DevToBrowser:
             return False
         for indicator in self.CAPTCHA_INDICATORS:
             try:
-                if self._page.locator(indicator).first.is_visible(timeout=500):
+                # is_visible() returns immediately (no wait). The `timeout`
+                # parameter is deprecated and silently ignored by Playwright,
+                # so it must not be passed.  PlaywrightTimeoutError is still
+                # caught defensively in case the locator itself times out.
+                if self._page.locator(indicator).first.is_visible():
                     logger.warning("CAPTCHA/challenge detected: %s", indicator)
                     self._save_debug_screenshot("captcha_detected")
                     return True
@@ -179,7 +195,7 @@ class DevToBrowser:
                 continue
         for text in self.CAPTCHA_TEXT_INDICATORS:
             try:
-                if self._page.get_by_text(text).first.is_visible(timeout=500):
+                if self._page.get_by_text(text).first.is_visible():
                     logger.warning("CAPTCHA detected: %s", text)
                     self._save_debug_screenshot("captcha_detected")
                     return True
@@ -300,10 +316,12 @@ class DevToBrowser:
             return False
 
     # Fallback selectors for logged-in detection (meta tag may not exist on all pages)
+    # NOTE: 'button[aria-label="Navigation menu"]' is intentionally excluded — it
+    # exists on the anonymous dev.to homepage and produces a false positive that
+    # bypasses ensure_logged_in() for all write operations.
     SELS_LOGGED_IN_FALLBACK = (
         'meta[name="user-signed-in"][content="true"]',
         'a[href="/new"]',              # "Create Post" link (only visible when logged in)
-        'button[aria-label="Navigation menu"]',  # Mobile nav (logged-in)
         'a[href="/notifications"]',    # Notifications bell
         'img.crayons-avatar',          # User avatar in nav
     )
@@ -694,33 +712,42 @@ class DevToBrowser:
 
     def reply_to_comment(
         self,
-        comment_id: int,
+        comment_id_code: str,
         body_markdown: str,
         article_url: str = "",
     ) -> dict | None:
         """Reply to an existing comment thread via the web form.
 
-        Scopes all interactions to the specific comment container
-        (#comment-node-{comment_id}) to avoid filling the wrong form.
+        Scopes all interactions to the specific comment container found
+        via ``[data-path$="/comments/{id_code}"]`` to avoid filling the
+        wrong form.
 
         Args:
-            comment_id: Numeric ID of the parent comment to reply to.
+            comment_id_code: The ``id_code`` string returned by the Forem
+                comments API (e.g. ``"34ohb"``).  The Forem DOM attaches
+                this value inside the ``data-path`` attribute on the
+                comment container div.
             body_markdown: Markdown text of the reply.
             article_url: Full article URL (required).
 
         Returns:
             Synthetic result dict on success, None on failure.
         """
-        # RID-001: Validate comment_id before constructing CSS selectors.
-        # Python type hints are not enforced at runtime; callers may pass strings
-        # containing CSS special characters (e.g. >, ], whitespace) that would
-        # cause locator() to silently select wrong DOM elements.
-        if not isinstance(comment_id, int) or comment_id <= 0:
-            logger.warning("Invalid comment_id for reply: %s", comment_id)
+        # RID-001: Validate comment_id_code before constructing CSS selectors.
+        # Must be a non-empty alphanumeric string — reject anything that could
+        # break a CSS attribute selector (e.g. quotes, brackets, whitespace).
+        if (
+            not isinstance(comment_id_code, str)
+            or not comment_id_code
+            or not comment_id_code.replace("-", "").replace("_", "").isalnum()
+        ):
+            logger.warning("Invalid comment_id_code for reply: %s", comment_id_code)
             return None
 
         if not article_url:
-            logger.warning("No article URL for reply to comment %d.", comment_id)
+            logger.warning(
+                "No article URL for reply to comment %s.", comment_id_code,
+            )
             return None
 
         try:
@@ -732,16 +759,20 @@ class DevToBrowser:
             self._page.goto(article_url, wait_until="domcontentloaded")
             self._human_delay(1.0, 2.0)
 
-            # Scope all interactions to the specific comment container
-            container_sel = f"#comment-node-{comment_id}"
+            # Scope all interactions to the specific comment container.
+            # The Forem DOM sets data-path=".../<article>/comments/<id_code>"
+            # on each comment div.  We match on the suffix to locate the node.
+            container_sel = f'[data-path$="/comments/{comment_id_code}"]'
             try:
                 container = self._page.locator(container_sel).first
                 container.wait_for(state="visible", timeout=5000)
             except PlaywrightTimeoutError:
                 self._save_debug_screenshot(
-                    f"reply_container_not_found_{comment_id}"
+                    f"reply_container_not_found_{comment_id_code}"
                 )
-                logger.warning("Comment node #%d not found on page.", comment_id)
+                logger.warning(
+                    "Comment node %s not found on page.", comment_id_code,
+                )
                 return None
 
             # Click the reply button within the comment container
@@ -757,44 +788,42 @@ class DevToBrowser:
 
             if reply_btn is None:
                 self._save_debug_screenshot(
-                    f"reply_button_not_found_{comment_id}"
+                    f"reply_button_not_found_{comment_id_code}"
                 )
-                logger.warning("Reply button not found for comment %d.", comment_id)
+                logger.warning(
+                    "Reply button not found for comment %s.", comment_id_code,
+                )
                 return None
 
             reply_btn.click()
             self._human_delay(0.5, 1.0)
 
-            # Find the reply textarea — prefer ID-scoped selector (#textarea-for-{id})
-            # for precision over class-based fallbacks, since each comment has a unique
-            # textarea ID. Timeout standardized to 2000ms across all selector attempts.
+            # Find the reply textarea within the container.  The Forem DOM
+            # names each textarea ``#textarea-for-{numeric_id}``, but the API
+            # only provides the string ``id_code`` — not the numeric ID.
+            # We therefore rely on class-based selectors scoped to the
+            # already-resolved container div (safe: one textarea per node).
             textarea = None
-            id_sel = f"textarea#textarea-for-{comment_id}"
-            try:
-                loc = self._page.locator(id_sel).first
-                if loc.is_visible(timeout=2000):
-                    textarea = loc
-                    logger.debug("Reply textarea found via ID selector for comment %d.", comment_id)
-            except PlaywrightTimeoutError:
-                pass
-
-            if textarea is None:
-                for sel in self.SELS_REPLY_TEXTAREA:
-                    loc = container.locator(sel).first
-                    try:
-                        if loc.is_visible(timeout=2000):
-                            textarea = loc
-                            logger.debug("Reply textarea found via fallback selector '%s'.", sel)
-                            break
-                    except PlaywrightTimeoutError:
-                        continue
+            for sel in self.SELS_REPLY_TEXTAREA:
+                loc = container.locator(sel).first
+                try:
+                    if loc.is_visible(timeout=2000):
+                        textarea = loc
+                        logger.debug(
+                            "Reply textarea found via selector '%s' for "
+                            "comment %s.", sel, comment_id_code,
+                        )
+                        break
+                except PlaywrightTimeoutError:
+                    continue
 
             if textarea is None:
                 self._save_debug_screenshot(
-                    f"reply_textarea_not_found_{comment_id}"
+                    f"reply_textarea_not_found_{comment_id_code}"
                 )
                 logger.warning(
-                    "Reply textarea not found for comment %d.", comment_id
+                    "Reply textarea not found for comment %s.",
+                    comment_id_code,
                 )
                 return None
 
@@ -816,10 +845,11 @@ class DevToBrowser:
 
             if submit_btn is None:
                 self._save_debug_screenshot(
-                    f"reply_submit_not_found_{comment_id}"
+                    f"reply_submit_not_found_{comment_id_code}"
                 )
                 logger.warning(
-                    "Reply submit button not found for comment %d.", comment_id
+                    "Reply submit button not found for comment %s.",
+                    comment_id_code,
                 )
                 return None
 
@@ -844,33 +874,275 @@ class DevToBrowser:
 
             if posted:
                 logger.info(
-                    "Reply posted to comment %d via browser (%d chars).",
-                    comment_id, len(body_markdown),
+                    "Reply posted to comment %s via browser (%d chars).",
+                    comment_id_code, len(body_markdown),
                 )
                 self._save_session()
                 return {
                     "status": "replied",
-                    "comment_id": comment_id,
+                    "comment_id_code": comment_id_code,
                     "source": "browser",
                 }
 
-            logger.warning("Reply may not have posted to comment %d.", comment_id)
-            self._save_debug_screenshot(f"reply_failed_{comment_id}")
+            logger.warning(
+                "Reply may not have posted to comment %s.", comment_id_code,
+            )
+            self._save_debug_screenshot(f"reply_failed_{comment_id_code}")
             return None
 
         except BrowserLoginRequired:
             logger.error("Cannot reply — login required.")
             return None
         except PlaywrightTimeoutError:
-            logger.warning("Reply to comment %d timed out.", comment_id)
-            self._save_debug_screenshot(f"reply_timeout_{comment_id}")
+            logger.warning(
+                "Reply to comment %s timed out.", comment_id_code,
+            )
+            self._save_debug_screenshot(f"reply_timeout_{comment_id_code}")
             return None
         except Exception as exc:
             logger.error(
-                "Unexpected browser error replying to comment %d: %s",
-                comment_id, exc,
+                "Unexpected browser error replying to comment %s: %s",
+                comment_id_code, exc,
             )
             return None
+
+    def like_comment(
+        self,
+        comment_id_code: str,
+        article_url: str = "",
+    ) -> bool:
+        """Like a comment by clicking its heart/like button.
+
+        Navigates to the article page, finds the comment container via
+        ``[data-path$="/comments/{id_code}"]``, and clicks the like button
+        scoped within that container.
+
+        Args:
+            comment_id_code: The ``id_code`` string returned by the Forem
+                comments API (e.g. ``"34ohb"``).
+            article_url: Full article URL (required).
+
+        Returns:
+            True on success (liked or already liked), False on failure.
+        """
+        # Validate comment_id_code — same guard as reply_to_comment()
+        if (
+            not isinstance(comment_id_code, str)
+            or not comment_id_code
+            or not comment_id_code.replace("-", "").replace("_", "").isalnum()
+        ):
+            logger.warning("Invalid comment_id_code for like: %s", comment_id_code)
+            return False
+
+        if not article_url:
+            logger.warning(
+                "No article URL for liking comment %s.", comment_id_code,
+            )
+            return False
+
+        try:
+            self.ensure_logged_in()
+            if self._page is None:
+                logger.error("Browser page not initialized for comment like.")
+                return False
+
+            self._page.goto(article_url, wait_until="domcontentloaded")
+            self._human_delay(1.0, 2.0)
+
+            # Locate the comment container by its data-path attribute
+            container_sel = f'[data-path$="/comments/{comment_id_code}"]'
+            try:
+                container = self._page.locator(container_sel).first
+                container.wait_for(state="visible", timeout=5000)
+            except PlaywrightTimeoutError:
+                self._save_debug_screenshot(
+                    f"like_container_not_found_{comment_id_code}"
+                )
+                logger.warning(
+                    "Comment node %s not found for like.", comment_id_code,
+                )
+                return False
+
+            # Find the like button within the comment container
+            like_btn = None
+            for sel in self.SELS_COMMENT_LIKE_BUTTON:
+                loc = container.locator(sel).first
+                try:
+                    if loc.is_visible(timeout=2000):
+                        like_btn = loc
+                        break
+                except PlaywrightTimeoutError:
+                    continue
+
+            if like_btn is None:
+                self._save_debug_screenshot(
+                    f"like_button_not_found_{comment_id_code}"
+                )
+                logger.warning(
+                    "Like button not found for comment %s.", comment_id_code,
+                )
+                return False
+
+            # Check if already liked (avoid toggling off)
+            classes = like_btn.get_attribute("class") or ""
+            if self.COMMENT_LIKE_ACTIVATED_CLASS in classes:
+                logger.info(
+                    "Comment %s already liked. Skipping.", comment_id_code,
+                )
+                return True
+
+            like_btn.click()
+            self._human_delay(0.5, 1.5)
+
+            # Verify activation
+            classes = like_btn.get_attribute("class") or ""
+            if self.COMMENT_LIKE_ACTIVATED_CLASS in classes:
+                logger.info(
+                    "Liked comment %s via browser.", comment_id_code,
+                )
+                self._save_session()
+                return True
+
+            # Button clicked but activation class not detected — return False.
+            # Unknown outcome must not be treated as success: the click may have
+            # been intercepted, throttled, or aimed at the wrong element.
+            # The caller will not mark the comment as liked, allowing future retry.
+            logger.warning(
+                "Like click dispatched for comment %s but activation class not confirmed. "
+                "Treating as failure to allow retry.",
+                comment_id_code,
+            )
+            return False
+
+        except BrowserLoginRequired:
+            logger.error("Cannot like comment — login required.")
+            return False
+        except PlaywrightTimeoutError:
+            logger.warning(
+                "Like comment %s timed out.", comment_id_code,
+            )
+            self._save_debug_screenshot(f"like_timeout_{comment_id_code}")
+            return False
+        except Exception as exc:
+            logger.error(
+                "Unexpected browser error liking comment %s: %s",
+                comment_id_code, exc,
+            )
+            return False
+
+    # --- Follow ---
+
+    # Follow button selectors — verified from Forem source code:
+    # app/views/users/_follow_button.html.erb
+    # app/javascript/packs/followButtons.js
+    SELS_FOLLOW_BUTTON = (
+        "button[data-info*='\"action\":\"follow\"'][data-info*='\"className\":\"User\"']",
+        ".follow-action-button",
+        "button.crayons-btn.follow-action-button",
+        "button[aria-label*='follow']",
+    )
+
+    def follow_user(self, profile_url: str) -> bool:
+        """Follow a dev.to user by clicking the Follow button on their profile.
+
+        Navigates to the profile URL, finds the Follow button, clicks it,
+        and verifies the state changes to "Following".
+
+        Args:
+            profile_url: Full profile URL (e.g. https://dev.to/username).
+
+        Returns:
+            True on success (followed or already following), False on failure.
+        """
+        try:
+            self.ensure_logged_in()
+            if self._page is None:
+                logger.error("Browser page not initialized for follow.")
+                return False
+
+            self._page.goto(profile_url, wait_until="domcontentloaded")
+            self._human_delay(1.5, 3.0)
+
+            # Check for CAPTCHA
+            if self._detect_captcha():
+                self._save_debug_screenshot("follow_captcha")
+                logger.error("CAPTCHA detected on profile page. Aborting follow.")
+                return False
+
+            # Find the Follow button using selector fallbacks
+            follow_btn = None
+            for sel in self.SELS_FOLLOW_BUTTON:
+                try:
+                    loc = self._page.locator(sel).first
+                    if loc.is_visible(timeout=2000):
+                        follow_btn = loc
+                        break
+                except PlaywrightTimeoutError:
+                    continue
+
+            if follow_btn is None:
+                self._save_debug_screenshot("follow_button_not_found")
+                logger.warning(
+                    "Follow button not found on profile: %s", profile_url,
+                )
+                return False
+
+            # Check if already following (button text says "Following")
+            btn_text = (follow_btn.inner_text() or "").strip().lower()
+            if btn_text == "following":
+                logger.info(
+                    "Already following user at %s. Skipping.", profile_url,
+                )
+                return True
+
+            # Click the follow button
+            follow_btn.click()
+            self._human_delay(0.5, 1.5)
+
+            # Verify button state changed to "Following"
+            try:
+                new_text = (follow_btn.inner_text() or "").strip().lower()
+                if new_text == "following":
+                    logger.info("Followed user at %s via browser.", profile_url)
+                    self._save_session()
+                    return True
+            except Exception:
+                pass
+
+            # Fallback: check if any button now says "Following"
+            for sel in self.SELS_FOLLOW_BUTTON:
+                try:
+                    loc = self._page.locator(sel).first
+                    if loc.is_visible(timeout=1000):
+                        text = (loc.inner_text() or "").strip().lower()
+                        if text == "following":
+                            logger.info(
+                                "Followed user at %s (verified via fallback).",
+                                profile_url,
+                            )
+                            self._save_session()
+                            return True
+                except PlaywrightTimeoutError:
+                    continue
+
+            logger.warning(
+                "Follow click did not change button state at %s.", profile_url,
+            )
+            self._save_debug_screenshot("follow_state_unchanged")
+            return False
+
+        except BrowserLoginRequired:
+            logger.error("Cannot follow — login required.")
+            return False
+        except PlaywrightTimeoutError:
+            logger.warning("Follow timed out at %s.", profile_url)
+            self._save_debug_screenshot("follow_timeout")
+            return False
+        except Exception as exc:
+            logger.error(
+                "Unexpected browser error following %s: %s", profile_url, exc,
+            )
+            return False
 
     # --- Detection Helpers ---
 

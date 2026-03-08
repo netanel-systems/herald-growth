@@ -23,7 +23,9 @@ from pathlib import Path
 from growth.browser import BrowserError, BrowserLoginRequired, DevToBrowser
 from growth.client import DevToClient, DevToError
 from growth.config import GrowthConfig, load_config
+from growth.engagement_state import EngagementState
 from growth.learner import GrowthLearner
+from growth.schema import build_engagement_entry, generate_cycle_id
 from growth.scout import ArticleScout
 from growth.storage import load_json_ids, save_json_ids
 
@@ -87,6 +89,14 @@ class ReactionEngine:
         self.scout = ArticleScout(self.client, config)
         self.data_dir = config.abs_data_dir
         self._browser: DevToBrowser | None = None
+        self._engagement_state: EngagementState | None = None
+
+    @property
+    def engagement_state(self) -> EngagementState:
+        """Lazy-init engagement state (D5)."""
+        if self._engagement_state is None:
+            self._engagement_state = EngagementState(self.data_dir)
+        return self._engagement_state
 
     def load_reacted_ids(self) -> set[int]:
         """Load article IDs we already reacted to."""
@@ -103,19 +113,34 @@ class ReactionEngine:
         """Load article IDs we already commented on (for filtering)."""
         return load_json_ids(self.data_dir / "commented.json")
 
-    def log_engagement(self, action: str, article: dict, details: dict) -> None:
-        """Append to engagement_log.jsonl — full audit trail."""
+    def log_engagement(
+        self,
+        action: str,
+        article: dict,
+        details: dict,
+        cycle_id: str | None = None,
+    ) -> None:
+        """Append to engagement_log.jsonl with enhanced X1 schema."""
         path = self.data_dir / "engagement_log.jsonl"
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "action": action,
-            "article_id": article.get("id"),
-            "article_title": article.get("title", "")[:100],
-            "author": article.get("user", {}).get("username", ""),
-            "tags": [t.get("name", t) if isinstance(t, dict) else t for t in article.get("tag_list", article.get("tags", []))],
+        user = article.get("user", {})
+        entry = build_engagement_entry(
+            action=action,
+            platform="devto",
+            target_username=user.get("username", ""),
+            target_post_id=str(article.get("id", "")),
+            target_followers_at_engagement=None,  # Populated when scout targeting ships
+            target_post_reactions_at_engagement=article.get("public_reactions_count",
+                                                            article.get("positive_reactions_count")),
+            target_post_age_hours=None,
+            cycle_id=cycle_id,
+            # Existing fields preserved
+            article_id=article.get("id"),
+            article_title=article.get("title", "")[:100],
+            author_username=user.get("username", ""),
+            tags=[t.get("name", t) if isinstance(t, dict) else t for t in article.get("tag_list", article.get("tags", []))],
             **details,
-        }
+        )
         with open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
 
@@ -229,6 +254,7 @@ class ReactionEngine:
         """
         logger.info("=== Reaction cycle starting (browser=%s) ===", self.config.use_browser)
         start = time.time()
+        cycle_id = generate_cycle_id()
 
         try:
             reacted_ids = self.load_reacted_ids()
@@ -273,12 +299,23 @@ class ReactionEngine:
             skipped_count = 0
             failed_count = 0
             new_reacted: set[int] = set()
+            # Per-author engagement counter for this cycle (D2)
+            author_engagement_count: dict[str, int] = {}
+            max_per_author = self.config.max_engagements_per_author_per_cycle
 
             for idx, article in enumerate(candidates[:max_reactions]):
                 aid = article.get("id")
                 if not aid:
                     skipped_count += 1
                     continue
+
+                # Per-author cap check (D2)
+                author_username = article.get("user", {}).get("username", "")
+                if author_username:
+                    current_count = author_engagement_count.get(author_username, 0)
+                    if current_count >= max_per_author:
+                        skipped_count += 1
+                        continue
 
                 category = pick_reaction_category()
                 article_url = article.get("url", "")
@@ -297,10 +334,19 @@ class ReactionEngine:
                 if success:
                     reacted_count += 1
                     new_reacted.add(aid)
+                    if author_username:
+                        author_engagement_count[author_username] = (
+                            author_engagement_count.get(author_username, 0) + 1
+                        )
+                        # Record like in engagement state (D5)
+                        try:
+                            self.engagement_state.record_like(author_username)
+                        except Exception as es_exc:
+                            logger.warning("EngagementState.record_like failed: %s", es_exc)
                     self.log_engagement("reaction", article, {
                         "category": category,
                         "method": "browser" if self.config.use_browser else "api",
-                    })
+                    }, cycle_id=cycle_id)
                 else:
                     failed_count += 1
                     if rate_limited:
@@ -313,9 +359,10 @@ class ReactionEngine:
                         continue
                     logger.info("Reaction failed on article %d. Continuing.", aid)
 
-                # Delay after every attempt (success or fail) for rate-limit safety
+                # Randomized delay between reactions (D2: +/-30%)
                 if idx < max_reactions - 1:
-                    time.sleep(self.config.reaction_delay)
+                    delay = self.config.reaction_delay * random.uniform(0.7, 1.3)
+                    time.sleep(delay)
 
             # Save updated reacted IDs
             reacted_ids.update(new_reacted)

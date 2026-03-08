@@ -43,7 +43,7 @@ def main() -> None:
 
         print(json.dumps(result, indent=2))
     except Exception as e:
-        logger.error("Tracker failed: %s", e, exc_info=True)
+        logger.exception("Tracker failed: %s", e)
         sys.exit(1)
 
 

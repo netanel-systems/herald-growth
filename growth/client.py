@@ -166,6 +166,23 @@ class DevToClient:
         """
         return self._request("GET", f"/articles/{article_id}")
 
+    # --- User Profiles (D1: scout targeting) ---
+
+    def get_user_profile(self, username: str) -> dict:
+        """Get a user's profile by username (D1: scout targeting).
+
+        Uses GET /api/users/by_username?url={username}.
+        Returns dict with username, joined_at, etc.
+        Raises DevToError on failure or if username is blank.
+        """
+        username = username.strip()
+        if not username:
+            raise DevToError("get_user_profile: username must not be blank")
+        return self._request(
+            "GET", "/users/by_username",
+            params={"url": username},
+        )
+
     # --- Tags ---
 
     def get_tags(self, page: int = 1, per_page: int = 100) -> list[dict]:
@@ -228,7 +245,12 @@ class DevToClient:
             username: dev.to username to fetch articles for.
             per_page: Number of articles (max 30).
             page: Page number for pagination.
+        Raises:
+            DevToError: If username is blank.
         """
+        username = username.strip()
+        if not username:
+            raise DevToError("get_articles_by_username: username must not be blank")
         params: dict = {
             "username": username,
             "per_page": min(per_page, 30),

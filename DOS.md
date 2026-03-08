@@ -37,3 +37,7 @@
 1. All state in `data/` — reacted.json, commented.json, engagement_log.jsonl
 2. Browser state in `data/browser_state.json` — do NOT commit this file
 3. Screenshots in `data/screenshots/` — debug artifacts, do NOT commit
+
+## Code Review Import Check (Added 2026-02-27)
+
+Before approving any code: verify every name used in the file has a corresponding import. `grep` for usage patterns that are not in the import block.
