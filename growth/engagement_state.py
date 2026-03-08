@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -180,9 +180,11 @@ class EngagementState:
                 cooldown_dt = datetime.fromisoformat(cooldown_until)
                 if datetime.now(timezone.utc) < cooldown_dt:
                     return True
-                # Cooldown expired -- reset
+                # Cooldown expired -- reset and persist immediately so the
+                # reset is not silently discarded between record_* calls.
                 target["cooldown_until"] = None
                 target["touchpoint_count"] = 0
+                self.save()
                 return False
             except (ValueError, TypeError):
                 pass
@@ -198,7 +200,6 @@ class EngagementState:
             return  # Reciprocating -- no cooldown
         touchpoints = target.get("touchpoint_count", 0)
         if touchpoints >= MAX_UNRECIPROCATED_TOUCHPOINTS:
-            from datetime import timedelta
             cooldown_end = datetime.now(timezone.utc) + timedelta(days=COOLDOWN_DAYS)
             target["cooldown_until"] = cooldown_end.isoformat()
             logger.info(

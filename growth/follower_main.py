@@ -101,7 +101,7 @@ def main() -> None:
 
         print(json.dumps(summary, indent=2))
     except Exception as e:
-        logger.error("Follow cycle failed: %s", e, exc_info=True)
+        logger.exception("Follow cycle failed: %s", e)
         sys.exit(1)
 
 

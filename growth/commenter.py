@@ -201,7 +201,7 @@ class CommentEngine:
             logger.warning("Comment too long (%d chars). Max 600.", len(body))
             return False
 
-        # Must be 2-4 sentences (D4: content-aware comments need more room)
+        # Must be 1-4 sentences (D4: single-sentence comments are allowed)
         # Use lookbehind to avoid splitting on abbreviations (e.g. "Dr. Smith")
         sentences = [s for s in re.split(r'(?<=[.!?])\s+', body) if s.strip()]
         if not (1 <= len(sentences) <= 4):

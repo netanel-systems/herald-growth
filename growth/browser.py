@@ -183,7 +183,11 @@ class DevToBrowser:
             return False
         for indicator in self.CAPTCHA_INDICATORS:
             try:
-                if self._page.locator(indicator).first.is_visible(timeout=500):
+                # is_visible() returns immediately (no wait). The `timeout`
+                # parameter is deprecated and silently ignored by Playwright,
+                # so it must not be passed.  PlaywrightTimeoutError is still
+                # caught defensively in case the locator itself times out.
+                if self._page.locator(indicator).first.is_visible():
                     logger.warning("CAPTCHA/challenge detected: %s", indicator)
                     self._save_debug_screenshot("captcha_detected")
                     return True
@@ -191,7 +195,7 @@ class DevToBrowser:
                 continue
         for text in self.CAPTCHA_TEXT_INDICATORS:
             try:
-                if self._page.get_by_text(text).first.is_visible(timeout=500):
+                if self._page.get_by_text(text).first.is_visible():
                     logger.warning("CAPTCHA detected: %s", text)
                     self._save_debug_screenshot("captcha_detected")
                     return True

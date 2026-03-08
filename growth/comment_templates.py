@@ -133,7 +133,7 @@ def get_template_constraints(category: str) -> dict:
     Raises:
         KeyError: If category is not a valid template category.
     """
-    return TEMPLATE_CATEGORIES[category]["constraints"]
+    return dict(TEMPLATE_CATEGORIES[category]["constraints"])
 
 
 def has_question(text: str) -> bool:
