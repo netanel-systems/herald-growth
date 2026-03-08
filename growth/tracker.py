@@ -121,7 +121,7 @@ class GrowthTracker:
         if not path.exists():
             return {
                 "volume": {"reactions": 0, "comments": 0, "follows": 0},
-                "reply_rate": 0.0,
+                "question_rate": 0.0,
                 "template_distribution": {},
                 "targeting": {"avg_target_followers": None, "avg_target_reactions": None, "avg_post_age_hours": None},
                 "health": {"errors": 0},
@@ -215,7 +215,13 @@ class GrowthTracker:
             fbr_data = calculate_fbr(self.data_dir, lookback_days=7)
         except Exception as e:
             logger.warning("FBR calculation failed: %s", e)
-            fbr_data = {"fbr_percent": 0.0, "error": str(e)}
+            fbr_data = {
+                "fbr_percent": 0.0,
+                "attributed_followers": 0,
+                "total_engaged_users": 0,
+                "current_followers": 0,
+                "error": str(e),
+            }
 
         engagement_stats = self._compute_engagement_stats()
 

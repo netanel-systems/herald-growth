@@ -235,6 +235,8 @@ class FollowEngine:
                     continue
             except Exception as es_exc:
                 logger.warning("EngagementState.should_follow failed: %s", es_exc)
+                skipped_count += 1
+                continue
 
             # Attempt follow
             try:

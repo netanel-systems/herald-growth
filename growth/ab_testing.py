@@ -107,7 +107,9 @@ def fishers_exact_test(
 
     control_rate = control_successes / control_total
     variant_rate = variant_successes / variant_total
-    lift = ((variant_rate - control_rate) / control_rate * 100) if control_rate > 0 else 0.0
+    # When control_rate is zero, lift is mathematically undefined (division by zero).
+    # Return None so callers can distinguish "lift is zero" from "lift is undefined".
+    lift: float | None = ((variant_rate - control_rate) / control_rate * 100) if control_rate > 0 else None
 
     a = control_successes
     b = control_total - control_successes
@@ -155,7 +157,7 @@ def fishers_exact_test(
         "significant": p_value < 0.05,
         "control_rate": round(control_rate, 4),
         "variant_rate": round(variant_rate, 4),
-        "lift_percent": round(lift, 2),
+        "lift_percent": round(lift, 2) if lift is not None else None,
     }
 
 
