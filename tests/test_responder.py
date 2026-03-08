@@ -404,7 +404,7 @@ class TestOwnPostResponderStorage(unittest.TestCase):
 
 
 class TestOwnPostResponderCommenterLimit(unittest.TestCase):
-    """Test max-1-reply-per-commenter-per-article enforcement."""
+    """Test max-MAX_REPLIES_PER_COMMENTER-replies-per-commenter-per-article enforcement."""
 
     def setUp(self):
         import tempfile
@@ -422,31 +422,36 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
             llm_fn = lambda body, title: "Interesting take on that specific pattern."
         return OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
 
-    def test_multiple_comments_same_user_same_article_gets_one_reply(self):
-        """A user who posts N comments on one article gets exactly 1 reply in-run."""
+    def test_multiple_comments_same_user_same_article_respects_limit(self):
+        """A user who posts N comments on one article gets at most MAX_REPLIES_PER_COMMENTER replies."""
+        from growth.responder import MAX_REPLIES_PER_COMMENTER
+
         responder = self._make_responder()
         responder.client.get_articles_by_username.return_value = [
             _make_article(1, "My Article", "https://dev.to/testuser/my-article")
         ]
-        # Same user posts three comments on the same article
+        # alice posts 5 comments; limit is MAX_REPLIES_PER_COMMENTER (3)
         responder.client.get_article_comments.return_value = [
             _make_comment("c001", "alice", "First comment by alice."),
             _make_comment("c002", "alice", "Second comment by alice."),
             _make_comment("c003", "alice", "Third comment by alice."),
+            _make_comment("c004", "alice", "Fourth comment by alice."),
+            _make_comment("c005", "alice", "Fifth comment by alice."),
         ]
 
         summary = responder.run()
 
-        # Only the first comment from alice should trigger a reply
-        self.assertEqual(summary["replied"], 1)
-        # The other two should be counted as skipped (marked processed)
-        self.assertEqual(summary["skipped"], 2)
-        # alice recorded in replied_per_article.json
+        # alice gets exactly MAX_REPLIES_PER_COMMENTER (3) replies
+        self.assertEqual(summary["replied"], MAX_REPLIES_PER_COMMENTER)
+        # The remaining 2 comments are skipped
+        self.assertEqual(summary["skipped"], 5 - MAX_REPLIES_PER_COMMENTER)
+        # alice recorded in replied_per_article.json with count = MAX_REPLIES_PER_COMMENTER
         replied = responder.load_replied_per_article()
-        self.assertIn("alice", replied.get("1", []))
+        self.assertIn("alice", replied.get("1", {}))
+        self.assertEqual(replied["1"]["alice"], MAX_REPLIES_PER_COMMENTER)
 
     def test_same_user_different_articles_both_get_replies(self):
-        """A user may receive one reply per article — restriction is per-article."""
+        """A user may receive replies per article — restriction is per-article."""
         responder = self._make_responder()
         responder.client.get_articles_by_username.return_value = [
             _make_article(1, "Article One", "https://dev.to/testuser/article-one"),
@@ -464,12 +469,95 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
 
         self.assertEqual(summary["replied"], 2)
         replied = responder.load_replied_per_article()
-        self.assertIn("bob", replied.get("1", []))
-        self.assertIn("bob", replied.get("2", []))
+        self.assertIn("bob", replied.get("1", {}))
+        self.assertIn("bob", replied.get("2", {}))
 
-    def test_cross_run_persistence_blocks_second_reply(self):
-        """Cross-run: a pre-populated replied_per_article.json prevents a second reply."""
-        # Pre-populate replied_per_article.json as if a previous cron already replied
+    def test_cross_run_persistence_blocks_reply_at_limit(self):
+        """Cross-run: a pre-populated replied_per_article.json at max count prevents further replies."""
+        from growth.responder import MAX_REPLIES_PER_COMMENTER
+
+        # Pre-populate with alice already at MAX_REPLIES_PER_COMMENTER (new dict format)
+        replied_path = self.data_dir / "replied_per_article.json"
+        replied_path.write_text(json.dumps({"1": {"alice": MAX_REPLIES_PER_COMMENTER}}))
+
+        responder = self._make_responder()
+        responder.client.get_articles_by_username.return_value = [
+            _make_article(1, "My Article", "https://dev.to/testuser/my-article")
+        ]
+        # alice posts a new comment — but she is already at the limit
+        responder.client.get_article_comments.return_value = [
+            _make_comment("c020", "alice", "Alice comments again after reaching limit."),
+        ]
+
+        summary = responder.run()
+
+        # No reply — alice is at MAX_REPLIES_PER_COMMENTER
+        self.assertEqual(summary["replied"], 0)
+        self.assertEqual(summary["skipped"], 1)
+
+    def test_user_with_count_2_gets_third_reply(self):
+        """A user with count=2 in the cross-run map is under the limit and gets a reply."""
+        from growth.responder import MAX_REPLIES_PER_COMMENTER
+
+        # Pre-populate with alice at count=2 (below MAX_REPLIES_PER_COMMENTER=3)
+        replied_path = self.data_dir / "replied_per_article.json"
+        replied_path.write_text(json.dumps({"1": {"alice": 2}}))
+
+        responder = self._make_responder()
+        responder.client.get_articles_by_username.return_value = [
+            _make_article(1, "My Article", "https://dev.to/testuser/my-article")
+        ]
+        responder.client.get_article_comments.return_value = [
+            _make_comment("c030", "alice", "Alice posts a new comment — count was 2."),
+        ]
+
+        summary = responder.run()
+
+        # count=2 < MAX_REPLIES_PER_COMMENTER=3, so a reply IS sent
+        self.assertEqual(summary["replied"], 1)
+        replied = responder.load_replied_per_article()
+        # Count should now be 3 (2 cross-run + 1 in-run)
+        self.assertEqual(replied["1"]["alice"], MAX_REPLIES_PER_COMMENTER)
+
+    def test_user_with_count_3_gets_no_reply(self):
+        """A user with count=3 (at MAX_REPLIES_PER_COMMENTER) gets no further replies."""
+        from growth.responder import MAX_REPLIES_PER_COMMENTER
+
+        replied_path = self.data_dir / "replied_per_article.json"
+        replied_path.write_text(json.dumps({"1": {"alice": MAX_REPLIES_PER_COMMENTER}}))
+
+        responder = self._make_responder()
+        responder.client.get_articles_by_username.return_value = [
+            _make_article(1, "My Article", "https://dev.to/testuser/my-article")
+        ]
+        responder.client.get_article_comments.return_value = [
+            _make_comment("c031", "alice", "Alice comments but is at the limit."),
+        ]
+
+        summary = responder.run()
+
+        self.assertEqual(summary["replied"], 0)
+        self.assertEqual(summary["skipped"], 1)
+
+    def test_backward_compat_list_format_loaded_as_fully_used(self):
+        """Legacy list format on disk is loaded without error as fully-used entries."""
+        from growth.responder import MAX_REPLIES_PER_COMMENTER
+
+        # Write the old list-format file (as currently exists on disk)
+        replied_path = self.data_dir / "replied_per_article.json"
+        replied_path.write_text(json.dumps({"3321258": ["nyrok"]}))
+
+        responder = self._make_responder()
+        loaded = responder.load_replied_per_article()
+
+        # Must parse without error and treat legacy entry as fully used up
+        self.assertIn("3321258", loaded)
+        self.assertIn("nyrok", loaded["3321258"])
+        self.assertEqual(loaded["3321258"]["nyrok"], MAX_REPLIES_PER_COMMENTER)
+
+    def test_backward_compat_list_format_blocks_reply_on_next_run(self):
+        """After loading legacy list format, commenter is correctly blocked on the next run."""
+        # Write the old list-format file
         replied_path = self.data_dir / "replied_per_article.json"
         replied_path.write_text(json.dumps({"1": ["alice"]}))
 
@@ -477,14 +565,14 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
         responder.client.get_articles_by_username.return_value = [
             _make_article(1, "My Article", "https://dev.to/testuser/my-article")
         ]
-        # alice posts a new comment — but we already replied to her in a prior run
+        # alice posts a new comment — but she is in the legacy list (fully used up)
         responder.client.get_article_comments.return_value = [
-            _make_comment("c020", "alice", "Alice comments again after prior reply."),
+            _make_comment("c040", "alice", "Alice comments, was in legacy list."),
         ]
 
         summary = responder.run()
 
-        # No reply — alice is already in the cross-run map
+        # No reply — alice is treated as having MAX_REPLIES_PER_COMMENTER from the legacy list
         self.assertEqual(summary["replied"], 0)
         self.assertEqual(summary["skipped"], 1)
 
@@ -493,8 +581,8 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
         from growth.responder import MAX_REPLIED_ARTICLES
 
         responder = self._make_responder()
-        # Build a dict with 600 entries (over cap)
-        large_replied = {str(i): ["user1"] for i in range(600)}
+        # Build a dict with 600 entries (over cap), using new dict[str, dict[str, int]] format
+        large_replied = {str(i): {"user1": 1} for i in range(600)}
         responder.save_replied_per_article(large_replied)
 
         loaded = responder.load_replied_per_article()

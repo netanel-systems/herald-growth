@@ -10,7 +10,7 @@ For each comment received on our own articles:
 Rules:
 - Max 1 reply per incoming comment. No thread continuation.
 - Never continue beyond the initial reply.
-- Max 1 reply per unique commenter per article across ALL cron runs.
+- Max MAX_REPLIES_PER_COMMENTER replies per unique commenter per article across ALL cron runs.
 - Troll comments are silently skipped — no like, no reply, marked processed.
 - Replies are specific to what the commenter said.
 - No self-promotion in replies.
@@ -42,6 +42,8 @@ MAX_OWN_ARTICLES = 10
 ENGAGE_DELAY = 5.0
 # Maximum articles tracked in replied_per_article.json before rotating oldest
 MAX_REPLIED_ARTICLES = 500
+# Maximum replies we send to any single commenter on a given article (across all cron runs)
+MAX_REPLIES_PER_COMMENTER = 3
 
 
 class OwnPostResponder:
@@ -139,12 +141,19 @@ class OwnPostResponder:
             raise
         logger.info("Saved %d responded comment IDs.", len(bounded))
 
-    def load_replied_per_article(self) -> dict[str, list[str]]:
-        """Load the per-article commenter reply map.
+    def load_replied_per_article(self) -> dict[str, dict[str, int]]:
+        """Load the per-article commenter reply count map.
 
-        Returns a dict mapping article_id (str) to a list of commenter
-        usernames already replied to on that article across all cron runs.
+        Returns a dict mapping article_id (str) to a dict of
+        {commenter_username: reply_count} for all commenters already replied
+        to on that article across all cron runs.
         Returns empty dict if file is missing or corrupted.
+
+        Backward compat: if the on-disk value for an article is a list (old
+        format from before this change), each username in that list is treated
+        as fully used up — converted to {username: MAX_REPLIES_PER_COMMENTER}.
+        This prevents a second reply cycle from sending additional replies to
+        users who already received one under the old schema.
 
         File: data/replied_per_article.json
         """
@@ -153,31 +162,49 @@ class OwnPostResponder:
             return {}
         try:
             data = json.loads(path.read_text())
-            if isinstance(data, dict):
-                # Validate all values are lists of strings
-                return {
-                    str(k): [str(u) for u in v]
-                    for k, v in data.items()
-                    if isinstance(v, list)
-                }
-            logger.warning(
-                "replied_per_article.json: unexpected format %s, returning empty dict.",
-                type(data).__name__,
-            )
-            return {}
+            if not isinstance(data, dict):
+                logger.warning(
+                    "replied_per_article.json: unexpected format %s, returning empty dict.",
+                    type(data).__name__,
+                )
+                return {}
+            result: dict[str, dict[str, int]] = {}
+            for k, v in data.items():
+                article_id_str = str(k)
+                if isinstance(v, list):
+                    # Backward compat: old format stored a list of usernames.
+                    # Treat every entry as fully used up (MAX_REPLIES_PER_COMMENTER).
+                    logger.info(
+                        "replied_per_article.json: article %s has legacy list format — "
+                        "converting to count dict (treating as MAX_REPLIES_PER_COMMENTER).",
+                        article_id_str,
+                    )
+                    result[article_id_str] = {
+                        str(u): MAX_REPLIES_PER_COMMENTER for u in v
+                    }
+                elif isinstance(v, dict):
+                    result[article_id_str] = {
+                        str(u): int(count) for u, count in v.items()
+                    }
+                else:
+                    logger.warning(
+                        "replied_per_article.json: article %s has unexpected value type %s — skipping.",
+                        article_id_str, type(v).__name__,
+                    )
+            return result
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Failed to load replied_per_article.json: %s", exc)
             return {}
 
-    def save_replied_per_article(self, replied: dict[str, list[str]]) -> None:
-        """Atomically save the per-article commenter reply map.
+    def save_replied_per_article(self, replied: dict[str, dict[str, int]]) -> None:
+        """Atomically save the per-article commenter reply count map.
 
         Bounded to MAX_REPLIED_ARTICLES (500) entries — oldest keys are rotated
         out when the map exceeds the cap. Uses atomic_write_json from storage.py
         to prevent corruption if the process crashes mid-write.
 
         Args:
-            replied: dict mapping article_id (str) -> list of commenter usernames.
+            replied: dict mapping article_id (str) -> {commenter_username: reply_count}.
         """
         if len(replied) > MAX_REPLIED_ARTICLES:
             # Rotate: keep the most recently added articles (last N by insertion order).
@@ -413,8 +440,9 @@ class OwnPostResponder:
 
         Enforces two additional guards beyond comment-ID dedup:
 
-        1. Per-commenter limit: at most 1 reply per unique commenter per article,
-           across all cron runs. State persisted in data/replied_per_article.json.
+        1. Per-commenter limit: at most MAX_REPLIES_PER_COMMENTER replies per
+           unique commenter per article, across all cron runs. State persisted
+           in data/replied_per_article.json.
 
         2. Troll detection: hostile/bad-faith comments are silently skipped —
            no like, no reply. Marked as processed so they are never re-evaluated.
@@ -447,8 +475,8 @@ class OwnPostResponder:
         skipped_count = 0
         trolls_skipped = 0
         new_responded: set[str] = set()
-        # Track commenters replied to in this run: article_id_str -> set of usernames
-        replied_this_run: dict[str, set[str]] = {}
+        # Track reply counts accumulated in this run: article_id_str -> {username: count}
+        replied_this_run: dict[str, dict[str, int]] = {}
         processed_this_run = 0
 
         for article in articles:
@@ -504,20 +532,24 @@ class OwnPostResponder:
                     skipped_count += 1
                     continue
 
-                # Per-commenter limit: max 1 reply per unique commenter per article.
-                # Check cross-run state (replied_per_article) first, then in-run state.
-                already_replied_cross_run = (
-                    commenter_username
-                    and commenter_username in replied_per_article.get(article_id_str, [])
+                # Per-commenter limit: max MAX_REPLIES_PER_COMMENTER replies per
+                # unique commenter per article. Sum cross-run persisted count and
+                # in-run count to get the total already sent.
+                cross_run_count = (
+                    replied_per_article.get(article_id_str, {}).get(commenter_username, 0)
+                    if commenter_username else 0
                 )
-                already_replied_this_run = (
-                    commenter_username
-                    and commenter_username in replied_this_run.get(article_id_str, set())
+                in_run_count = (
+                    replied_this_run.get(article_id_str, {}).get(commenter_username, 0)
+                    if commenter_username else 0
                 )
-                if already_replied_cross_run or already_replied_this_run:
+                total_replied_count = cross_run_count + in_run_count
+                if commenter_username and total_replied_count >= MAX_REPLIES_PER_COMMENTER:
                     logger.info(
-                        "Skipping comment %s — already replied to @%s on article %s.",
-                        comment_id_code, commenter_username, article_id_str,
+                        "Skipping comment %s — @%s has reached the reply limit "
+                        "(%d/%d) on article %s.",
+                        comment_id_code, commenter_username,
+                        total_replied_count, MAX_REPLIES_PER_COMMENTER, article_id_str,
                     )
                     # Mark as processed so we do not re-evaluate on the next cron run
                     new_responded.add(comment_id_code)
@@ -590,10 +622,11 @@ class OwnPostResponder:
                         new_responded.add(comment_id_code)
                         processed_this_run += 1
 
-                        # Record the commenter as replied-to on this article
+                        # Increment the in-run reply count for this commenter on this article
                         if commenter_username:
-                            replied_this_run.setdefault(article_id_str, set()).add(
-                                commenter_username
+                            article_counts = replied_this_run.setdefault(article_id_str, {})
+                            article_counts[commenter_username] = (
+                                article_counts.get(commenter_username, 0) + 1
                             )
 
                         self._log_action(
@@ -622,11 +655,11 @@ class OwnPostResponder:
                 # Rate-limit safety between comment engagements
                 time.sleep(ENGAGE_DELAY)
 
-        # Merge in-run replied commenter state into cross-run map
-        for art_id, usernames in replied_this_run.items():
-            existing = replied_per_article.get(art_id, [])
-            merged = list(dict.fromkeys(existing + list(usernames)))  # dedup, order-preserving
-            replied_per_article[art_id] = merged
+        # Merge in-run reply counts into the cross-run map
+        for art_id, in_run_counts in replied_this_run.items():
+            existing = replied_per_article.setdefault(art_id, {})
+            for username, count in in_run_counts.items():
+                existing[username] = existing.get(username, 0) + count
 
         # Save both state files atomically
         responded_ids.update(new_responded)
