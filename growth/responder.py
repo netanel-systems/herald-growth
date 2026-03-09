@@ -644,10 +644,13 @@ class OwnPostResponder:
                             "Marking as processed to prevent retry on next cron run.",
                             comment_id_code,
                         )
-                        self._log_action(
-                            "reply_failed", comment_id_code, article_id,
-                            article_title, commenter_username,
-                        )
+                        try:
+                            self._log_action(
+                                "reply_failed", comment_id_code, article_id,
+                                article_title, commenter_username,
+                            )
+                        except Exception as log_exc:
+                            logger.warning("Failed to log reply_failed action: %s", log_exc)
                         new_responded.add(comment_id_code)
                         processed_this_run += 1
                 except BrowserLoginRequired:
