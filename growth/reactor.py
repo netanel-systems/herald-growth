@@ -23,6 +23,9 @@ from pathlib import Path
 from growth.browser import BrowserError, BrowserLoginRequired, DevToBrowser
 from growth.client import DevToClient, DevToError
 from growth.config import GrowthConfig, load_config
+from growth.engagement_state import EngagementState
+from growth.learner import GrowthLearner
+from growth.schema import build_engagement_entry, generate_cycle_id
 from growth.scout import ArticleScout
 from growth.storage import load_json_ids, save_json_ids
 
@@ -86,6 +89,14 @@ class ReactionEngine:
         self.scout = ArticleScout(self.client, config)
         self.data_dir = config.abs_data_dir
         self._browser: DevToBrowser | None = None
+        self._engagement_state: EngagementState | None = None
+
+    @property
+    def engagement_state(self) -> EngagementState:
+        """Lazy-init engagement state (D5)."""
+        if self._engagement_state is None:
+            self._engagement_state = EngagementState(self.data_dir)
+        return self._engagement_state
 
     def load_reacted_ids(self) -> set[int]:
         """Load article IDs we already reacted to."""
@@ -102,31 +113,62 @@ class ReactionEngine:
         """Load article IDs we already commented on (for filtering)."""
         return load_json_ids(self.data_dir / "commented.json")
 
-    def log_engagement(self, action: str, article: dict, details: dict) -> None:
-        """Append to engagement_log.jsonl — full audit trail."""
+    def log_engagement(
+        self,
+        action: str,
+        article: dict,
+        details: dict,
+        cycle_id: str | None = None,
+    ) -> None:
+        """Append to engagement_log.jsonl with enhanced X1 schema."""
         path = self.data_dir / "engagement_log.jsonl"
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "action": action,
-            "article_id": article.get("id"),
-            "article_title": article.get("title", "")[:100],
-            "author": article.get("user", {}).get("username", ""),
-            "tags": [t.get("name", t) if isinstance(t, dict) else t for t in article.get("tag_list", article.get("tags", []))],
+        user = article.get("user", {})
+        entry = build_engagement_entry(
+            action=action,
+            platform="devto",
+            target_username=user.get("username", ""),
+            target_post_id=str(article.get("id", "")),
+            target_followers_at_engagement=None,  # Populated when scout targeting ships
+            target_post_reactions_at_engagement=article.get("public_reactions_count",
+                                                            article.get("positive_reactions_count")),
+            target_post_age_hours=None,
+            cycle_id=cycle_id,
+            # Existing fields preserved
+            article_id=article.get("id"),
+            article_title=article.get("title", "")[:100],
+            author_username=user.get("username", ""),
+            tags=[t.get("name", t) if isinstance(t, dict) else t for t in article.get("tag_list", article.get("tags", []))],
             **details,
-        }
+        )
         with open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
 
     def trim_engagement_log(self) -> None:
-        """Trim engagement log to max_engagement_log entries."""
+        """Trim engagement log to max_engagement_log entries. Atomic write."""
+        import os
+        import tempfile
+
         path = self.data_dir / "engagement_log.jsonl"
         if not path.exists():
             return
-        lines = path.read_text().strip().split("\n")
+        lines = [line for line in path.read_text().strip().split("\n") if line.strip()]
         if len(lines) > self.config.max_engagement_log:
             trimmed = lines[-self.config.max_engagement_log:]
-            path.write_text("\n".join(trimmed) + "\n")
+            content = "\n".join(trimmed) + "\n"
+            fd, tmp_path = tempfile.mkstemp(
+                dir=path.parent, suffix=".tmp", prefix=".engagement_",
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(content)
+                os.replace(tmp_path, path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
             logger.info(
                 "Trimmed engagement log: %d -> %d entries.",
                 len(lines), len(trimmed),
@@ -158,6 +200,52 @@ class ReactionEngine:
         """React to an article using the API (admin-only — will fail for regular users)."""
         return self.client.react_to_article(article_id, category=category)
 
+    def _filter_by_learner(self, candidates: list[dict]) -> list[dict]:
+        """Remove candidates whose tags are flagged low-performing by GrowthLearner.
+
+        Safe: any exception from the learner is logged and the full unfiltered
+        candidate list is returned so the cycle continues unaffected.
+        """
+        try:
+            learner = GrowthLearner(self.config)
+            filtered: list[dict] = []
+            skipped_by_learner = 0
+            for article in candidates:
+                tags = [
+                    t.get("name", t) if isinstance(t, dict) else t
+                    for t in article.get("tag_list", article.get("tags", []))
+                ]
+                if any(learner.should_skip_tag(tag) for tag in tags if isinstance(tag, str)):
+                    skipped_by_learner += 1
+                    logger.info(
+                        "Learner skipping article %d (low-performing tags: %s)",
+                        article.get("id"), tags,
+                    )
+                else:
+                    filtered.append(article)
+            if skipped_by_learner:
+                logger.info(
+                    "Learner filtered %d candidates (low-performing tags).",
+                    skipped_by_learner,
+                )
+            return filtered
+        except Exception:
+            logger.exception("GrowthLearner.should_skip_tag() raised — using unfiltered candidates.")
+            return candidates
+
+    def _run_learner_analyze(self) -> None:
+        """Run GrowthLearner.analyze() after cycle completes.
+
+        Safe: any exception is logged and silently swallowed so the
+        cycle result and summary are never affected by learner errors.
+        """
+        try:
+            learner = GrowthLearner(self.config)
+            new_learnings = learner.analyze()
+            logger.info("GrowthLearner.analyze() complete: %d new learnings.", len(new_learnings))
+        except Exception:
+            logger.exception("GrowthLearner.analyze() raised — cycle result unaffected.")
+
     def run(self) -> dict:
         """Main entry point for cron. Finds articles, reacts, logs.
 
@@ -166,6 +254,7 @@ class ReactionEngine:
         """
         logger.info("=== Reaction cycle starting (browser=%s) ===", self.config.use_browser)
         start = time.time()
+        cycle_id = generate_cycle_id()
 
         try:
             reacted_ids = self.load_reacted_ids()
@@ -203,16 +292,30 @@ class ReactionEngine:
                     "Attempt %d: %d candidates (need %d). Sampling new tags...",
                     attempt + 1, len(candidates), max_reactions,
                 )
+            # Filter candidates using learner intelligence — skip low-performing tags
+            candidates = self._filter_by_learner(candidates)
+
             reacted_count = 0
             skipped_count = 0
             failed_count = 0
             new_reacted: set[int] = set()
+            # Per-author engagement counter for this cycle (D2)
+            author_engagement_count: dict[str, int] = {}
+            max_per_author = self.config.max_engagements_per_author_per_cycle
 
             for idx, article in enumerate(candidates[:max_reactions]):
                 aid = article.get("id")
                 if not aid:
                     skipped_count += 1
                     continue
+
+                # Per-author cap check (D2)
+                author_username = article.get("user", {}).get("username", "")
+                if author_username:
+                    current_count = author_engagement_count.get(author_username, 0)
+                    if current_count >= max_per_author:
+                        skipped_count += 1
+                        continue
 
                 category = pick_reaction_category()
                 article_url = article.get("url", "")
@@ -231,20 +334,35 @@ class ReactionEngine:
                 if success:
                     reacted_count += 1
                     new_reacted.add(aid)
+                    if author_username:
+                        author_engagement_count[author_username] = (
+                            author_engagement_count.get(author_username, 0) + 1
+                        )
+                        # Record like in engagement state (D5)
+                        try:
+                            self.engagement_state.record_like(author_username)
+                        except Exception as es_exc:
+                            logger.warning("EngagementState.record_like failed: %s", es_exc)
                     self.log_engagement("reaction", article, {
                         "category": category,
                         "method": "browser" if self.config.use_browser else "api",
-                    })
+                    }, cycle_id=cycle_id)
                 else:
                     failed_count += 1
                     if rate_limited:
-                        logger.info("Rate limited on article %d. Stopping early.", aid)
-                        break
+                        remaining = len(candidates[:max_reactions]) - idx - 1
+                        logger.warning(
+                            "Rate limited on article %d. Backing off 5s, then next (%d remaining).",
+                            aid, remaining,
+                        )
+                        time.sleep(5)
+                        continue
                     logger.info("Reaction failed on article %d. Continuing.", aid)
 
-                # Delay after every attempt (success or fail) for rate-limit safety
+                # Randomized delay between reactions (D2: +/-30%)
                 if idx < max_reactions - 1:
-                    time.sleep(self.config.reaction_delay)
+                    delay = self.config.reaction_delay * random.uniform(0.7, 1.3)
+                    time.sleep(delay)
 
             # Save updated reacted IDs
             reacted_ids.update(new_reacted)
@@ -252,6 +370,9 @@ class ReactionEngine:
 
             # Periodic log trimming
             self.trim_engagement_log()
+
+            # Run learning analysis after each cycle — safe, never crashes cycle
+            self._run_learner_analyze()
 
             elapsed = time.time() - start
             summary = {
