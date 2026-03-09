@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Max comments to process per run (rate-limit safety)
 MAX_COMMENTS_PER_RUN = 10
 # Articles to inspect per run (last N days worth from our own feed)
-MAX_OWN_ARTICLES = 10
+MAX_OWN_ARTICLES = 30
 # Delay between comment engagement actions (seconds)
 ENGAGE_DELAY = 5.0
 # Maximum articles tracked in replied_per_article.json before rotating oldest
@@ -640,9 +640,12 @@ class OwnPostResponder:
                         )
                     else:
                         logger.warning(
-                            "Browser returned None for reply to comment %s.",
+                            "Browser returned None for reply to comment %s. "
+                            "Marking as processed to prevent retry on next cron run.",
                             comment_id_code,
                         )
+                        new_responded.add(comment_id_code)
+                        processed_this_run += 1
                 except BrowserLoginRequired:
                     logger.error("Login required — aborting responder cycle.")
                     break
