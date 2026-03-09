@@ -639,10 +639,20 @@ class OwnPostResponder:
                             comment_id_code, reply_text[:60],
                         )
                     else:
-                        logger.warning(
-                            "Browser returned None for reply to comment %s.",
+                        logger.error(
+                            "Browser returned None for reply to comment %s. "
+                            "Marking as processed to prevent retry on next cron run.",
                             comment_id_code,
                         )
+                        try:
+                            self._log_action(
+                                "reply_failed", comment_id_code, article_id,
+                                article_title, commenter_username,
+                            )
+                        except Exception as log_exc:
+                            logger.warning("Failed to log reply_failed action: %s", log_exc)
+                        new_responded.add(comment_id_code)
+                        processed_this_run += 1
                 except BrowserLoginRequired:
                     logger.error("Login required — aborting responder cycle.")
                     break
