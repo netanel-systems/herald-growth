@@ -758,5 +758,361 @@ class TestOwnPostResponderTrollDetection(unittest.TestCase):
         self.assertIn("trolls_skipped", summary)
 
 
+class TestOurRepliesStorage(unittest.TestCase):
+    """Test load/save our_replies.json — the orphan tracking map."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp())
+        self.config = _make_config(self.tmp)
+        self.data_dir = self.config.abs_data_dir
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+
+    def _make_responder(self):
+        mock_client = MagicMock()
+        mock_browser = MagicMock()
+        llm_fn = lambda b, t: "That is a specific and relevant observation."
+        return OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
+
+    def test_load_our_replies_missing_file_returns_empty_dict(self):
+        """load_our_replies() returns {} when our_replies.json does not exist."""
+        responder = self._make_responder()
+        result = responder.load_our_replies()
+        self.assertEqual(result, {})
+
+    def test_load_our_replies_corrupted_file_returns_empty_dict(self):
+        """load_our_replies() returns {} for corrupted JSON."""
+        path = self.data_dir / "our_replies.json"
+        path.write_text("{not valid json")
+        responder = self._make_responder()
+        result = responder.load_our_replies()
+        self.assertEqual(result, {})
+
+    def test_load_our_replies_wrong_type_returns_empty_dict(self):
+        """load_our_replies() returns {} if file contains a list instead of dict."""
+        path = self.data_dir / "our_replies.json"
+        path.write_text(json.dumps(["abc", "def"]))
+        responder = self._make_responder()
+        result = responder.load_our_replies()
+        self.assertEqual(result, {})
+
+    def test_save_our_reply_creates_file_and_round_trips(self):
+        """save_our_reply() writes to our_replies.json and load_our_replies() reads it back."""
+        responder = self._make_responder()
+        responder.save_our_reply(
+            our_id_code="reply1",
+            parent_id_code="parent1",
+            article_url="https://dev.to/user/article",
+            article_id=42,
+        )
+        loaded = responder.load_our_replies()
+        self.assertIn("reply1", loaded)
+        self.assertEqual(loaded["reply1"]["parent_id_code"], "parent1")
+        self.assertEqual(loaded["reply1"]["article_url"], "https://dev.to/user/article")
+        self.assertEqual(loaded["reply1"]["article_id"], 42)
+
+    def test_save_our_reply_accumulates_multiple_entries(self):
+        """Multiple calls to save_our_reply() accumulate entries in the file."""
+        responder = self._make_responder()
+        responder.save_our_reply("r1", "p1", "https://dev.to/u/a1", 1)
+        responder.save_our_reply("r2", "p2", "https://dev.to/u/a2", 2)
+        loaded = responder.load_our_replies()
+        self.assertIn("r1", loaded)
+        self.assertIn("r2", loaded)
+        self.assertEqual(len(loaded), 2)
+
+    def test_load_our_replies_skips_malformed_entries(self):
+        """load_our_replies() silently skips entries with missing required fields."""
+        path = self.data_dir / "our_replies.json"
+        # "bad" entry is missing article_id
+        path.write_text(json.dumps({
+            "good": {"parent_id_code": "p1", "article_url": "https://x.com", "article_id": 1},
+            "bad": {"parent_id_code": "p2"},  # missing article_url and article_id
+        }))
+        responder = self._make_responder()
+        loaded = responder.load_our_replies()
+        self.assertIn("good", loaded)
+        self.assertNotIn("bad", loaded)
+
+
+class TestCollectAllIdCodes(unittest.TestCase):
+    """Test _collect_all_id_codes() — recursive comment tree traversal."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp())
+        self.config = _make_config(self.tmp)
+        self.data_dir = self.config.abs_data_dir
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+
+    def _make_responder(self):
+        mock_client = MagicMock()
+        mock_browser = MagicMock()
+        llm_fn = lambda b, t: "Specific and relevant."
+        return OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
+
+    def test_flat_list_collects_all_id_codes(self):
+        """Flat comment list: all top-level id_codes are collected."""
+        responder = self._make_responder()
+        comments = [
+            {"id_code": "a1", "children": []},
+            {"id_code": "a2", "children": []},
+        ]
+        result = responder._collect_all_id_codes(comments)
+        self.assertEqual(result, {"a1", "a2"})
+
+    def test_nested_children_collected(self):
+        """Nested children at arbitrary depth are collected."""
+        responder = self._make_responder()
+        comments = [
+            {
+                "id_code": "root",
+                "children": [
+                    {
+                        "id_code": "child1",
+                        "children": [
+                            {"id_code": "grandchild1", "children": []},
+                        ],
+                    },
+                ],
+            },
+        ]
+        result = responder._collect_all_id_codes(comments)
+        self.assertEqual(result, {"root", "child1", "grandchild1"})
+
+    def test_empty_list_returns_empty_set(self):
+        """Empty comment list returns empty set."""
+        responder = self._make_responder()
+        self.assertEqual(responder._collect_all_id_codes([]), set())
+
+    def test_comment_without_id_code_is_skipped(self):
+        """Comments missing id_code are not added to the set."""
+        responder = self._make_responder()
+        comments = [{"body_html": "no id code here", "children": []}]
+        result = responder._collect_all_id_codes(comments)
+        self.assertEqual(result, set())
+
+
+class TestCleanOrphanedReplies(unittest.TestCase):
+    """Test clean_orphaned_replies() — core orphan detection and deletion logic."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp())
+        self.config = _make_config(self.tmp)
+        self.data_dir = self.config.abs_data_dir
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+
+    def _make_responder(self, llm_fn=None):
+        mock_client = MagicMock()
+        mock_browser = MagicMock()
+        mock_browser.delete_comment.return_value = True
+        if llm_fn is None:
+            llm_fn = lambda b, t: "Good point about that specific aspect."
+        return OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
+
+    def test_no_tracked_replies_returns_zero(self):
+        """clean_orphaned_replies() returns 0 when our_replies.json is empty/missing."""
+        responder = self._make_responder()
+        result = responder.clean_orphaned_replies()
+        self.assertEqual(result, 0)
+        responder.browser.delete_comment.assert_not_called()
+
+    def test_parent_still_exists_no_deletion(self):
+        """When the parent comment is still in the live tree, no deletion occurs."""
+        responder = self._make_responder()
+        responder.save_our_reply("our1", "parent1", "https://dev.to/u/a", 10)
+
+        # Live comment tree includes the parent
+        responder.client.get_article_comments.return_value = [
+            {"id_code": "parent1", "children": []},
+        ]
+
+        result = responder.clean_orphaned_replies()
+        self.assertEqual(result, 0)
+        responder.browser.delete_comment.assert_not_called()
+
+    def test_parent_missing_triggers_deletion(self):
+        """When the parent comment is absent from the live tree, the reply is deleted."""
+        responder = self._make_responder()
+        responder.save_our_reply("our1", "parent1", "https://dev.to/u/a", 10)
+
+        # Live tree does NOT contain parent1
+        responder.client.get_article_comments.return_value = [
+            {"id_code": "other_comment", "children": []},
+        ]
+
+        result = responder.clean_orphaned_replies()
+        self.assertEqual(result, 1)
+        responder.browser.delete_comment.assert_called_once_with(
+            "our1", "https://dev.to/u/a"
+        )
+
+    def test_deleted_entry_removed_from_our_replies_json(self):
+        """Successfully deleted orphan is removed from our_replies.json."""
+        responder = self._make_responder()
+        responder.save_our_reply("our1", "parent1", "https://dev.to/u/a", 10)
+
+        # Parent is gone
+        responder.client.get_article_comments.return_value = []
+
+        responder.clean_orphaned_replies()
+
+        remaining = responder.load_our_replies()
+        self.assertNotIn("our1", remaining)
+
+    def test_failed_deletion_keeps_entry_in_our_replies_json(self):
+        """If delete fails, the entry stays in our_replies.json for next run retry."""
+        responder = self._make_responder()
+        responder.browser.delete_comment.return_value = False  # deletion fails
+        responder.save_our_reply("our1", "parent1", "https://dev.to/u/a", 10)
+
+        # Parent is gone
+        responder.client.get_article_comments.return_value = []
+
+        result = responder.clean_orphaned_replies()
+
+        # Count is 0 — deletion failed
+        self.assertEqual(result, 0)
+        # Entry stays for retry
+        remaining = responder.load_our_replies()
+        self.assertIn("our1", remaining)
+
+    def test_cap_at_max_orphan_deletions_per_run(self):
+        """clean_orphaned_replies() deletes at most MAX_ORPHAN_DELETIONS_PER_RUN replies."""
+        from growth.responder import MAX_ORPHAN_DELETIONS_PER_RUN
+
+        responder = self._make_responder()
+
+        # Add MAX_ORPHAN_DELETIONS_PER_RUN + 5 tracked replies, all orphaned
+        for i in range(MAX_ORPHAN_DELETIONS_PER_RUN + 5):
+            responder.save_our_reply(
+                f"our{i}", f"parent{i}", "https://dev.to/u/a", 10,
+            )
+
+        # No live comments — all parents missing
+        responder.client.get_article_comments.return_value = []
+
+        result = responder.clean_orphaned_replies()
+        self.assertLessEqual(result, MAX_ORPHAN_DELETIONS_PER_RUN)
+
+    def test_deletion_logged_to_engagement_log(self):
+        """Each orphan deletion is recorded in engagement_log.jsonl."""
+        responder = self._make_responder()
+        responder.save_our_reply("our1", "parent1", "https://dev.to/u/a", 10)
+
+        # Parent is gone
+        responder.client.get_article_comments.return_value = []
+
+        responder.clean_orphaned_replies()
+
+        log_path = self.data_dir / "engagement_log.jsonl"
+        self.assertTrue(log_path.exists(), "engagement_log.jsonl must be created")
+        entries = [
+            json.loads(line)
+            for line in log_path.read_text().splitlines()
+            if line.strip()
+        ]
+        orphan_entries = [e for e in entries if e.get("action") == "delete_orphaned_reply"]
+        self.assertEqual(len(orphan_entries), 1)
+        self.assertEqual(orphan_entries[0]["comment_id"], "our1")
+
+    def test_browser_delete_exception_is_non_fatal(self):
+        """Exception raised by browser.delete_comment() does not crash the cycle."""
+        responder = self._make_responder()
+        responder.browser.delete_comment.side_effect = RuntimeError("browser crashed")
+        responder.save_our_reply("our1", "parent1", "https://dev.to/u/a", 10)
+
+        # Parent is gone
+        responder.client.get_article_comments.return_value = []
+
+        # Must not raise
+        result = responder.clean_orphaned_replies()
+        self.assertEqual(result, 0)
+
+    def test_multiple_articles_fetch_comments_once_each(self):
+        """Comments are fetched once per article, not once per tracked reply."""
+        responder = self._make_responder()
+        # Two replies on article 10, one on article 20
+        responder.save_our_reply("our1", "p1", "https://dev.to/u/a1", 10)
+        responder.save_our_reply("our2", "p2", "https://dev.to/u/a1", 10)
+        responder.save_our_reply("our3", "p3", "https://dev.to/u/a2", 20)
+
+        responder.client.get_article_comments.return_value = []  # all parents gone
+
+        responder.clean_orphaned_replies()
+
+        # get_article_comments called twice (once per article), not three times
+        self.assertEqual(responder.client.get_article_comments.call_count, 2)
+
+    def test_parent_in_nested_child_not_treated_as_orphan(self):
+        """A parent that is a nested child in the tree is NOT treated as orphaned."""
+        responder = self._make_responder()
+        responder.save_our_reply("our1", "deep_child", "https://dev.to/u/a", 10)
+
+        # Parent exists but is deeply nested
+        responder.client.get_article_comments.return_value = [
+            {
+                "id_code": "root",
+                "children": [
+                    {
+                        "id_code": "deep_child",
+                        "children": [],
+                    }
+                ],
+            }
+        ]
+
+        result = responder.clean_orphaned_replies()
+        self.assertEqual(result, 0)
+        responder.browser.delete_comment.assert_not_called()
+
+    def test_browser_without_delete_comment_does_not_crash(self):
+        """If browser lacks delete_comment(), clean_orphaned_replies() logs and continues."""
+        mock_client = MagicMock()
+        mock_browser = MagicMock(spec=[])  # spec=[] means no attributes
+        llm_fn = lambda b, t: "Specific point."
+        responder = OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
+
+        responder.save_our_reply("our1", "parent1", "https://dev.to/u/a", 10)
+        responder.client.get_article_comments.return_value = []
+
+        # Must not raise
+        result = responder.clean_orphaned_replies()
+        self.assertEqual(result, 0)
+
+    def test_run_summary_includes_orphans_cleaned_key(self):
+        """run() summary dict must always contain orphans_cleaned key."""
+        mock_client = MagicMock()
+        mock_browser = MagicMock()
+        mock_browser.delete_comment.return_value = True
+        llm_fn = lambda b, t: "Specific and relevant."
+        responder = OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
+        responder.client.get_articles_by_username.return_value = []
+
+        summary = responder.run()
+
+        self.assertIn("orphans_cleaned", summary)
+
+    def test_run_calls_clean_orphaned_replies_before_new_comments(self):
+        """run() invokes clean_orphaned_replies() before processing new comments."""
+        responder = self._make_responder()
+
+        # Pre-populate one tracked reply with missing parent
+        responder.save_our_reply("our1", "parent1", "https://dev.to/u/a", 1)
+
+        responder.client.get_articles_by_username.return_value = [
+            _make_article(1, "My Article", "https://dev.to/u/a"),
+        ]
+        # Live tree has no parent1 — orphan should be cleaned
+        responder.client.get_article_comments.return_value = []
+
+        summary = responder.run()
+
+        # Orphan cleaned
+        self.assertGreater(summary["orphans_cleaned"], 0)
+        responder.browser.delete_comment.assert_called()
+
+
 if __name__ == "__main__":
     unittest.main()

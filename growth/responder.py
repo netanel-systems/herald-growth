@@ -44,6 +44,8 @@ ENGAGE_DELAY = 5.0
 MAX_REPLIED_ARTICLES = 500
 # Maximum replies we send to any single commenter on a given article (across all cron runs)
 MAX_REPLIES_PER_COMMENTER = 3
+# Safety cap: never delete more than this many orphaned replies per run
+MAX_ORPHAN_DELETIONS_PER_RUN = 10
 
 
 class OwnPostResponder:
@@ -221,6 +223,295 @@ class OwnPostResponder:
         logger.info(
             "Saved replied_per_article.json: %d articles tracked.", len(replied),
         )
+
+    # ── Orphan Reply Tracking ───────────────────────────────────────────────
+
+    def load_our_replies(self) -> dict[str, dict]:
+        """Load our reply→parent mapping from our_replies.json.
+
+        Returns a dict mapping our comment id_code (str) to a record dict:
+            {
+                "parent_id_code": str,  # id_code of the parent comment we replied to
+                "article_url": str,     # article URL (needed for browser navigation)
+                "article_id": int,      # article numeric ID (for fetching comment tree)
+            }
+
+        Returns empty dict if file is missing or corrupted. Never raises.
+        """
+        path = self.data_dir / "our_replies.json"
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text())
+            if not isinstance(data, dict):
+                logger.warning(
+                    "our_replies.json: unexpected format %s — returning empty dict.",
+                    type(data).__name__,
+                )
+                return {}
+            # Validate each entry has the required keys; drop malformed ones
+            result: dict[str, dict] = {}
+            for our_id, record in data.items():
+                if (
+                    isinstance(record, dict)
+                    and "parent_id_code" in record
+                    and "article_url" in record
+                    and "article_id" in record
+                ):
+                    result[str(our_id)] = record
+                else:
+                    logger.warning(
+                        "our_replies.json: entry %s has missing fields — skipping.",
+                        our_id,
+                    )
+            return result
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to load our_replies.json: %s", exc)
+            return {}
+
+    def save_our_reply(
+        self,
+        our_id_code: str,
+        parent_id_code: str,
+        article_url: str,
+        article_id: int,
+    ) -> None:
+        """Record one of our replies in our_replies.json for orphan tracking.
+
+        Must be called immediately after a successful reply is posted. Uses
+        atomic_write_json to prevent corruption on crash mid-write.
+
+        Args:
+            our_id_code: The id_code of the comment we just posted.
+            parent_id_code: The id_code of the parent comment we replied to.
+            article_url: Full article URL (needed for browser navigation on delete).
+            article_id: Article numeric ID (needed to fetch the comment tree).
+        """
+        replies = self.load_our_replies()
+        replies[str(our_id_code)] = {
+            "parent_id_code": str(parent_id_code),
+            "article_url": str(article_url),
+            "article_id": int(article_id),
+        }
+        path = self.data_dir / "our_replies.json"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(path, replies)
+        logger.info(
+            "Saved our reply %s (parent=%s) to our_replies.json.",
+            our_id_code, parent_id_code,
+        )
+
+    def _collect_all_id_codes(self, comments: list[dict]) -> set[str]:
+        """Recursively collect every id_code present in a comment tree.
+
+        The Forem API returns top-level comments with a ``children`` list,
+        each child also having a ``children`` list, and so on. We collect
+        all id_codes at every depth so we can detect whether a specific
+        parent comment still exists anywhere in the tree.
+
+        Args:
+            comments: Top-level comment list from get_article_comments().
+
+        Returns:
+            Flat set of all id_code strings found in the tree.
+        """
+        found: set[str] = set()
+        stack = list(comments)
+        while stack:
+            comment = stack.pop()
+            id_code = comment.get("id_code")
+            if id_code:
+                found.add(str(id_code))
+            children = comment.get("children", [])
+            if isinstance(children, list):
+                stack.extend(children)
+        return found
+
+    def _find_our_reply_id_code(
+        self,
+        article_id: int,
+        parent_id_code: str,
+    ) -> str | None:
+        """Discover the id_code of our freshly posted reply.
+
+        After ``browser.reply_to_comment()`` succeeds, re-fetches the
+        comment tree for the article and searches the parent comment's
+        ``children`` list for a comment authored by our own username.
+        Returns the id_code of the first matching child, or None if not
+        found (e.g. API delay, misconfiguration).
+
+        Args:
+            article_id: Numeric article ID to re-fetch comments for.
+            parent_id_code: id_code of the parent comment we just replied to.
+
+        Returns:
+            id_code string of our reply, or None if not discoverable.
+        """
+        our_username = (self.config.devto_username or "").lower()
+        if not our_username:
+            logger.warning(
+                "_find_our_reply_id_code: devto_username not configured — "
+                "cannot discover reply id_code."
+            )
+            return None
+
+        comments = self.fetch_article_comments(article_id)
+
+        # Depth-first search for the parent comment, then inspect its children
+        stack = list(comments)
+        while stack:
+            comment = stack.pop()
+            if str(comment.get("id_code", "")) == parent_id_code:
+                # Found the parent — check its children for our reply
+                children = comment.get("children", [])
+                if isinstance(children, list):
+                    for child in children:
+                        child_username = (
+                            child.get("user", {}).get("username", "") or ""
+                        ).lower()
+                        if child_username == our_username:
+                            our_id = child.get("id_code")
+                            if our_id:
+                                return str(our_id)
+                return None  # Parent found but our reply not yet visible
+            children = comment.get("children", [])
+            if isinstance(children, list):
+                stack.extend(children)
+
+        return None  # Parent comment not found in tree
+
+    # ── Orphan Cleanup ──────────────────────────────────────────────────────
+
+    def clean_orphaned_replies(self) -> int:
+        """Delete any of our replies whose parent comment no longer exists.
+
+        Called at the START of each run() cycle, before processing new
+        comments. For each tracked reply in our_replies.json:
+
+        1. Fetch the comment tree for the article via the read-only API.
+        2. Check whether the parent id_code is still present in the tree.
+        3. If the parent is gone, delete our reply via browser automation.
+        4. Log the deletion to engagement_log.jsonl.
+        5. Remove the entry from our_replies.json (atomic write).
+
+        Bounded to MAX_ORPHAN_DELETIONS_PER_RUN (10) deletions per run.
+
+        Returns:
+            Number of orphaned replies successfully deleted this run.
+        """
+        replies = self.load_our_replies()
+        if not replies:
+            logger.info("clean_orphaned_replies: no tracked replies — skipping.")
+            return 0
+
+        logger.info(
+            "clean_orphaned_replies: checking %d tracked replies for orphans.",
+            len(replies),
+        )
+
+        # Group tracked replies by article_id to minimise API calls.
+        # For each article, we fetch the comment tree once and check all
+        # tracked replies for that article in a single pass.
+        articles_to_check: dict[int, list[tuple[str, dict]]] = {}
+        for our_id, record in replies.items():
+            art_id = int(record["article_id"])
+            articles_to_check.setdefault(art_id, []).append((our_id, record))
+
+        deleted_count = 0
+        entries_to_remove: list[str] = []
+
+        for article_id, tracked in articles_to_check.items():
+            if deleted_count >= MAX_ORPHAN_DELETIONS_PER_RUN:
+                logger.info(
+                    "clean_orphaned_replies: reached cap (%d). Stopping early.",
+                    MAX_ORPHAN_DELETIONS_PER_RUN,
+                )
+                break
+
+            # Fetch the live comment tree for this article (read-only API)
+            live_comments = self.fetch_article_comments(article_id)
+            live_id_codes = self._collect_all_id_codes(live_comments)
+
+            for our_id, record in tracked:
+                if deleted_count >= MAX_ORPHAN_DELETIONS_PER_RUN:
+                    break
+
+                parent_id_code = record["parent_id_code"]
+                article_url = record["article_url"]
+
+                if parent_id_code in live_id_codes:
+                    # Parent still exists — our reply is not orphaned
+                    logger.debug(
+                        "clean_orphaned_replies: parent %s of our reply %s "
+                        "still exists. OK.",
+                        parent_id_code, our_id,
+                    )
+                    continue
+
+                # Parent is gone — our reply is orphaned. Delete it.
+                logger.info(
+                    "clean_orphaned_replies: parent %s missing for our reply %s "
+                    "on article %d — deleting orphan.",
+                    parent_id_code, our_id, article_id,
+                )
+
+                deleted = False
+                if hasattr(self.browser, "delete_comment"):
+                    try:
+                        deleted = self.browser.delete_comment(our_id, article_url)
+                    except Exception as exc:
+                        logger.warning(
+                            "clean_orphaned_replies: browser.delete_comment(%s) "
+                            "raised: %s",
+                            our_id, exc,
+                        )
+                else:
+                    logger.warning(
+                        "clean_orphaned_replies: browser.delete_comment() not "
+                        "available — cannot delete orphan %s.",
+                        our_id,
+                    )
+
+                if deleted:
+                    deleted_count += 1
+                    entries_to_remove.append(our_id)
+                    self._log_action(
+                        "delete_orphaned_reply",
+                        our_id,
+                        article_id,
+                        "",  # article_title not stored in replies map
+                        "",  # commenter not relevant here
+                        reply_text=f"parent={parent_id_code}",
+                    )
+                    logger.info(
+                        "clean_orphaned_replies: deleted orphaned reply %s "
+                        "(parent=%s, article=%d).",
+                        our_id, parent_id_code, article_id,
+                    )
+                else:
+                    logger.warning(
+                        "clean_orphaned_replies: failed to delete orphan %s "
+                        "(parent=%s). Will retry on next run.",
+                        our_id, parent_id_code,
+                    )
+
+        # Atomically remove successfully deleted entries from our_replies.json
+        if entries_to_remove:
+            updated = {k: v for k, v in replies.items() if k not in entries_to_remove}
+            path = self.data_dir / "our_replies.json"
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(path, updated)
+            logger.info(
+                "clean_orphaned_replies: removed %d entries from our_replies.json "
+                "(%d remaining).",
+                len(entries_to_remove), len(updated),
+            )
+
+        logger.info(
+            "clean_orphaned_replies: done — %d orphan(s) deleted this run.",
+            deleted_count,
+        )
+        return deleted_count
 
     # ── Troll Detection ─────────────────────────────────────────────────────
 
@@ -453,6 +744,19 @@ class OwnPostResponder:
         logger.info("=== OwnPostResponder cycle starting ===")
         start = time.time()
 
+        # Step 0: Clean up orphaned replies before processing new ones.
+        # This runs first so the cleanup cap is always enforced regardless of
+        # how many new comments we process in this cycle.
+        orphans_cleaned = 0
+        try:
+            orphans_cleaned = self.clean_orphaned_replies()
+        except Exception as exc:
+            logger.warning(
+                "clean_orphaned_replies() raised an unexpected exception: %s. "
+                "Continuing with normal engagement cycle.",
+                exc,
+            )
+
         responded_ids = self.load_responded_ids()
         replied_per_article = self.load_replied_per_article()
         articles = self.fetch_own_articles()
@@ -466,6 +770,7 @@ class OwnPostResponder:
                 "replied": 0,
                 "skipped": 0,
                 "trolls_skipped": 0,
+                "orphans_cleaned": orphans_cleaned,
                 "elapsed_seconds": round(time.time() - start, 1),
             }
 
@@ -638,6 +943,35 @@ class OwnPostResponder:
                             "Replied to comment %s: '%s'",
                             comment_id_code, reply_text[:60],
                         )
+
+                        # Track our reply for orphan cleanup on future runs.
+                        # Re-fetch comments to discover the id_code of our
+                        # newly posted reply (Forem does not return it in the
+                        # browser reply result).
+                        try:
+                            our_reply_id = self._find_our_reply_id_code(
+                                article_id, comment_id_code,
+                            )
+                            if our_reply_id:
+                                self.save_our_reply(
+                                    our_reply_id,
+                                    comment_id_code,
+                                    article_url,
+                                    article_id,
+                                )
+                            else:
+                                logger.warning(
+                                    "Could not discover id_code of our reply "
+                                    "to comment %s — orphan tracking skipped "
+                                    "for this reply.",
+                                    comment_id_code,
+                                )
+                        except Exception as track_exc:
+                            logger.warning(
+                                "save_our_reply() failed for reply to %s: %s. "
+                                "Orphan tracking skipped (non-fatal).",
+                                comment_id_code, track_exc,
+                            )
                     else:
                         logger.error(
                             "Browser returned None for reply to comment %s. "
@@ -684,11 +1018,13 @@ class OwnPostResponder:
             "replied": replied_count,
             "skipped": skipped_count,
             "trolls_skipped": trolls_skipped,
+            "orphans_cleaned": orphans_cleaned,
             "elapsed_seconds": round(elapsed, 1),
         }
         logger.info(
-            "=== OwnPostResponder complete: %d liked, %d replied, %d trolls_skipped, %.1fs ===",
-            liked_count, replied_count, trolls_skipped, elapsed,
+            "=== OwnPostResponder complete: %d liked, %d replied, "
+            "%d trolls_skipped, %d orphans_cleaned, %.1fs ===",
+            liked_count, replied_count, trolls_skipped, orphans_cleaned, elapsed,
         )
         return summary
 
