@@ -891,7 +891,7 @@ class DevToBrowser:
             return None
 
         except BrowserLoginRequired:
-            logger.error("Cannot reply — login required.")
+            logger.error("Cannot reply — login required.")  # noqa: TRY400
             return None
         except PlaywrightTimeoutError:
             logger.warning(
@@ -900,7 +900,7 @@ class DevToBrowser:
             self._save_debug_screenshot(f"reply_timeout_{comment_id_code}")
             return None
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 "Unexpected browser error replying to comment %s: %s",
                 comment_id_code, exc,
             )
@@ -1015,7 +1015,7 @@ class DevToBrowser:
             return False
 
         except BrowserLoginRequired:
-            logger.error("Cannot like comment — login required.")
+            logger.error("Cannot like comment — login required.")  # noqa: TRY400
             return False
         except PlaywrightTimeoutError:
             logger.warning(
@@ -1024,7 +1024,7 @@ class DevToBrowser:
             self._save_debug_screenshot(f"like_timeout_{comment_id_code}")
             return False
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 "Unexpected browser error liking comment %s: %s",
                 comment_id_code, exc,
             )
@@ -1272,7 +1272,7 @@ class DevToBrowser:
                 return True
 
         except BrowserLoginRequired:
-            logger.error("Cannot delete comment — login required.")
+            logger.error("Cannot delete comment — login required.")  # noqa: TRY400
             return False
         except PlaywrightTimeoutError:
             logger.warning(
@@ -1281,7 +1281,7 @@ class DevToBrowser:
             self._save_debug_screenshot(f"delete_timeout_{comment_id_code}")
             return False
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 "Unexpected browser error deleting comment %s: %s",
                 comment_id_code, exc,
             )
@@ -1389,14 +1389,14 @@ class DevToBrowser:
             return False
 
         except BrowserLoginRequired:
-            logger.error("Cannot follow — login required.")
+            logger.error("Cannot follow — login required.")  # noqa: TRY400
             return False
         except PlaywrightTimeoutError:
             logger.warning("Follow timed out at %s.", profile_url)
             self._save_debug_screenshot("follow_timeout")
             return False
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 "Unexpected browser error following %s: %s", profile_url, exc,
             )
             return False
@@ -1429,7 +1429,7 @@ class DevToBrowser:
 
     def _human_delay(self, min_s: float = 0.5, max_s: float = 2.0) -> None:
         """Sleep for a random duration to simulate human behavior."""
-        time.sleep(random.uniform(min_s, max_s))
+        time.sleep(random.uniform(min_s, max_s))  # noqa: S311
 
     def _save_debug_screenshot(self, name: str) -> None:
         """Save a screenshot for debugging failed actions."""

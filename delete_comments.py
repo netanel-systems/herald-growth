@@ -24,6 +24,7 @@ Screenshot analysis from first run confirmed:
 
 import json
 import logging
+import os
 import random
 import sys
 import time
@@ -34,8 +35,8 @@ from dotenv import load_dotenv
 # Load .env from this directory
 load_dotenv(Path(__file__).parent / ".env")
 
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # noqa: E402
+from playwright.sync_api import sync_playwright  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +52,6 @@ COMMENT_ID_CODES = ["35i0j", "35i1g", "35i24"]
 STATE_PATH = Path(__file__).parent / "data" / "browser_state.json"
 SCREENSHOT_DIR = Path(__file__).parent / "data" / "screenshots"
 
-import os
 EMAIL = os.environ.get("GROWTH_DEVTO_EMAIL", "")
 PASSWORD = os.environ.get("GROWTH_DEVTO_PASSWORD", "")
 
@@ -62,7 +62,7 @@ USER_AGENT = (
 
 
 def human_delay(min_s: float = 0.5, max_s: float = 2.0) -> None:
-    time.sleep(random.uniform(min_s, max_s))
+    time.sleep(random.uniform(min_s, max_s))  # noqa: S311
 
 
 def save_screenshot(page, name: str) -> None:

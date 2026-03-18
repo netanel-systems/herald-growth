@@ -22,7 +22,7 @@ def assign_group() -> str:
     Returns:
         'control' or 'variant'.
     """
-    return random.choice(["control", "variant"])
+    return random.choice(["control", "variant"])  # noqa: S311
 
 
 def should_use_variant(ab_test_enabled: bool, group: str) -> bool:

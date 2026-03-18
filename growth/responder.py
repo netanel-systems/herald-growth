@@ -20,6 +20,7 @@ Dev.to API note: comments are fetched via GET /api/comments?a_id={article_id}
 using the read-only API client. Writes (like + reply) go through Playwright browser.
 """
 
+import contextlib
 import json
 import logging
 import time
@@ -136,10 +137,8 @@ class OwnPostResponder:
                 f.write(content)
             os.replace(tmp, path)
         except Exception:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp)
-            except OSError:
-                pass
             raise
         logger.info("Saved %d responded comment IDs.", len(bounded))
 

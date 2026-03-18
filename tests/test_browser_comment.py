@@ -21,13 +21,13 @@ from growth.browser import BrowserLoginRequired, DevToBrowser
 from growth.config import GrowthConfig
 
 
-@pytest.fixture()
+@pytest.fixture
 def config() -> GrowthConfig:
     """Minimal GrowthConfig for tests."""
     return GrowthConfig()
 
 
-@pytest.fixture()
+@pytest.fixture
 def browser(config: GrowthConfig, tmp_path) -> DevToBrowser:
     """DevToBrowser with mocked page (no real browser launched)."""
     b = DevToBrowser(config)
@@ -65,11 +65,10 @@ def test_no_article_url_returns_none(browser: DevToBrowser) -> None:
 
 def test_comment_form_not_found_returns_none(browser: DevToBrowser) -> None:
     """Missing comment form on page returns None."""
-    with patch.object(browser, "ensure_logged_in"):
-        with patch.object(browser, "_find_element", return_value=None):
-            result = browser.post_comment(
-                123, "A comment.", "https://dev.to/a/b",
-            )
+    with patch.object(browser, "ensure_logged_in"), patch.object(browser, "_find_element", return_value=None):
+        result = browser.post_comment(
+            123, "A comment.", "https://dev.to/a/b",
+        )
     assert result is None
 
 
@@ -88,11 +87,13 @@ def test_textarea_not_found_returns_none(browser: DevToBrowser) -> None:
             return form_loc  # comment form found
         return none_loc  # textarea not found
 
-    with patch.object(browser, "ensure_logged_in"):
-        with patch.object(browser, "_find_element", side_effect=_find_element_side_effect):
-            result = browser.post_comment(
-                123, "A comment.", "https://dev.to/a/b",
-            )
+    with (
+        patch.object(browser, "ensure_logged_in"),
+        patch.object(browser, "_find_element", side_effect=_find_element_side_effect),
+    ):
+        result = browser.post_comment(
+            123, "A comment.", "https://dev.to/a/b",
+        )
     assert result is None
 
 
@@ -114,11 +115,13 @@ def test_submit_not_found_returns_none(browser: DevToBrowser) -> None:
             return textarea_loc
         return none_loc  # submit button not found
 
-    with patch.object(browser, "ensure_logged_in"):
-        with patch.object(browser, "_find_element", side_effect=_find_element_side_effect):
-            result = browser.post_comment(
-                123, "A comment.", "https://dev.to/a/b",
-            )
+    with (
+        patch.object(browser, "ensure_logged_in"),
+        patch.object(browser, "_find_element", side_effect=_find_element_side_effect),
+    ):
+        result = browser.post_comment(
+            123, "A comment.", "https://dev.to/a/b",
+        )
     assert result is None
 
 
@@ -143,15 +146,17 @@ def test_successful_comment_post_text_verified(browser: DevToBrowser) -> None:
             return submit_loc
         return None
 
-    with patch.object(browser, "ensure_logged_in"):
-        with patch.object(browser, "_save_session"):
-            with patch.object(browser, "_find_element", side_effect=_find_element_side_effect):
-                browser._page.get_by_text.return_value = verified_text
+    with (
+        patch.object(browser, "ensure_logged_in"),
+        patch.object(browser, "_save_session"),
+        patch.object(browser, "_find_element", side_effect=_find_element_side_effect),
+    ):
+        browser._page.get_by_text.return_value = verified_text
 
-                result = browser.post_comment(
-                    123, "Solid approach to async patterns.",
-                    "https://dev.to/a/b",
-                )
+        result = browser.post_comment(
+            123, "Solid approach to async patterns.",
+            "https://dev.to/a/b",
+        )
 
     assert result is not None
     assert result["status"] == "posted"
@@ -181,15 +186,17 @@ def test_successful_comment_post_textarea_cleared(browser: DevToBrowser) -> None
             return submit_loc
         return None
 
-    with patch.object(browser, "ensure_logged_in"):
-        with patch.object(browser, "_save_session"):
-            with patch.object(browser, "_find_element", side_effect=_find_element_side_effect):
-                browser._page.get_by_text.return_value = timeout_text
+    with (
+        patch.object(browser, "ensure_logged_in"),
+        patch.object(browser, "_save_session"),
+        patch.object(browser, "_find_element", side_effect=_find_element_side_effect),
+    ):
+        browser._page.get_by_text.return_value = timeout_text
 
-                result = browser.post_comment(
-                    123, "Solid approach to async patterns.",
-                    "https://dev.to/a/b",
-                )
+        result = browser.post_comment(
+            123, "Solid approach to async patterns.",
+            "https://dev.to/a/b",
+        )
 
     assert result is not None
     assert result["status"] == "posted"

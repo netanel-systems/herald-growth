@@ -9,13 +9,13 @@ from growth.browser import BrowserLoginRequired, DevToBrowser
 from growth.config import GrowthConfig
 
 
-@pytest.fixture()
+@pytest.fixture
 def config() -> GrowthConfig:
     """Minimal GrowthConfig for tests."""
     return GrowthConfig()
 
 
-@pytest.fixture()
+@pytest.fixture
 def browser(config: GrowthConfig, tmp_path) -> DevToBrowser:
     """DevToBrowser with mocked page (no real browser launched)."""
     b = DevToBrowser(config)
@@ -109,34 +109,36 @@ def test_textarea_not_found_returns_none(browser: DevToBrowser) -> None:
 
 def test_successful_reply_returns_dict(browser: DevToBrowser) -> None:
     """Full success path returns dict with status='replied'."""
-    with patch.object(browser, "ensure_logged_in"):
-        with patch.object(browser, "_save_session"):
-            container = _locator(visible=True)
-            reply_btn = _locator(visible=True)
-            textarea = _locator(visible=True, value="")
-            submit_btn = _locator(visible=True)
-            verified_text = _locator(visible=True)
+    with (
+        patch.object(browser, "ensure_logged_in"),
+        patch.object(browser, "_save_session"),
+    ):
+        container = _locator(visible=True)
+        reply_btn = _locator(visible=True)
+        textarea = _locator(visible=True, value="")
+        submit_btn = _locator(visible=True)
+        verified_text = _locator(visible=True)
 
-            def container_loc(sel: str) -> MagicMock:
-                if "toggle-reply-form" in sel or "reply_button" in sel:
-                    return reply_btn
-                if "textarea" in sel:
-                    return textarea
-                if "submit" in sel or "comment-action-button" in sel:
-                    return submit_btn
-                return _locator(visible=False)
+        def container_loc(sel: str) -> MagicMock:
+            if "toggle-reply-form" in sel or "reply_button" in sel:
+                return reply_btn
+            if "textarea" in sel:
+                return textarea
+            if "submit" in sel or "comment-action-button" in sel:
+                return submit_btn
+            return _locator(visible=False)
 
-            container.locator.side_effect = container_loc
+        container.locator.side_effect = container_loc
 
-            def page_loc(sel: str) -> MagicMock:
-                if "data-path" in sel:
-                    return container
-                return _locator(visible=False)
+        def page_loc(sel: str) -> MagicMock:
+            if "data-path" in sel:
+                return container
+            return _locator(visible=False)
 
-            browser._page.locator.side_effect = page_loc
-            browser._page.get_by_text.return_value = verified_text
+        browser._page.locator.side_effect = page_loc
+        browser._page.get_by_text.return_value = verified_text
 
-            result = browser.reply_to_comment("abc12", "Nice post!", "https://dev.to/a/b")
+        result = browser.reply_to_comment("abc12", "Nice post!", "https://dev.to/a/b")
 
     assert result is not None
     assert result["status"] == "replied"

@@ -10,18 +10,17 @@ Tracks followed accounts in data/followed.json. Enforces daily cap
 Schema version: D3 (GitLab #14)
 """
 
+import contextlib
 import json
 import logging
 import random
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 from growth.browser import BrowserLoginRequired, DevToBrowser
 from growth.config import GrowthConfig
 from growth.engagement_state import EngagementState
 from growth.schema import build_engagement_entry, generate_cycle_id
-from growth.storage import load_json_ids, save_json_ids
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +97,8 @@ class FollowEngine:
                 f.write(content)
             os.replace(tmp, path)
         except Exception:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp)
-            except OSError:
-                pass
             raise
         logger.info("Saved %d followed usernames.", len(bounded))
 
@@ -242,7 +239,7 @@ class FollowEngine:
             try:
                 success = self.follow_user(username)
             except BrowserLoginRequired:
-                logger.error("Login required during follow cycle. Aborting.")
+                logger.exception("Login required during follow cycle. Aborting.")
                 break
             except Exception as e:
                 logger.warning("Follow failed for @%s: %s", username, e)
@@ -263,7 +260,7 @@ class FollowEngine:
                 failed_count += 1
 
             # Randomized delay between follows
-            delay = self.config.follow_delay * random.uniform(0.7, 1.3)
+            delay = self.config.follow_delay * random.uniform(0.7, 1.3)  # noqa: S311
             time.sleep(delay)
 
         # Save updated followed set

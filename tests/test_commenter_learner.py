@@ -5,7 +5,6 @@ Covers:
 - run_learner_analyze() — calls analyze() safely, never crashes cycle
 """
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -15,13 +14,13 @@ from growth.commenter import CommentEngine
 from growth.config import GrowthConfig
 
 
-@pytest.fixture()
+@pytest.fixture
 def config(tmp_path: Path) -> GrowthConfig:
     """GrowthConfig with tmp_path as project root."""
     return GrowthConfig(project_root=tmp_path)
 
 
-@pytest.fixture()
+@pytest.fixture
 def engine(config: GrowthConfig) -> CommentEngine:
     """CommentEngine with mocked client (no network calls)."""
     return CommentEngine(client=MagicMock(), config=config)

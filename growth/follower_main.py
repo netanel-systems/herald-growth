@@ -110,8 +110,8 @@ def main() -> None:
         atomic_write_state(STATE_PATH, state)
 
         print(json.dumps(summary, indent=2))
-    except Exception as e:
-        logger.exception("Follow cycle failed: %s", e)
+    except Exception:
+        logger.exception("Follow cycle failed")
         sys.exit(1)
 
 

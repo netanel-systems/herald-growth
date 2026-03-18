@@ -14,13 +14,13 @@ from growth.config import GrowthConfig
 from growth.reactor import ReactionEngine
 
 
-@pytest.fixture()
+@pytest.fixture
 def config(tmp_path: Path) -> GrowthConfig:
     """Minimal GrowthConfig with tmp_path as project root."""
     return GrowthConfig(project_root=tmp_path)
 
 
-@pytest.fixture()
+@pytest.fixture
 def engine(config: GrowthConfig) -> ReactionEngine:
     """ReactionEngine with mocked client and scout (no network calls)."""
     eng = ReactionEngine(config)

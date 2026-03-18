@@ -347,6 +347,6 @@ class DevToClient:
             self._request("GET", "/articles/me", params={"per_page": 1})
             logger.info("dev.to connection verified.")
             return True
-        except DevToError as e:
+        except DevToError:
             logger.exception("dev.to connection failed")
             return False

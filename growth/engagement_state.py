@@ -11,6 +11,7 @@ State persists to data/engagement_targets.json between cycles.
 Schema version: D5 (GitLab #14)
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -77,10 +78,8 @@ class EngagementState:
                 f.write(content)
             os.replace(tmp, self._path)
         except Exception:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp)
-            except OSError:
-                pass
             raise
 
     def _get_target(self, username: str) -> dict:

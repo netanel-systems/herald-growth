@@ -12,7 +12,7 @@ Gates 9-11 coverage:
 import json
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from growth.config import GrowthConfig
 from growth.responder import OwnPostResponder
@@ -65,7 +65,8 @@ class TestOwnPostResponderDedup(unittest.TestCase):
         mock_client = MagicMock()
         mock_browser = MagicMock()
         if llm_fn is None:
-            llm_fn = lambda body, title: "Interesting point about that specific thing."
+            def llm_fn(body, title):  # noqa: E306
+                return "Interesting point about that specific thing."
         return OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
 
     def test_already_responded_comment_is_skipped(self):
@@ -84,9 +85,9 @@ class TestOwnPostResponderDedup(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertEqual(summary["skipped"], 1)
-        self.assertEqual(summary["replied"], 0)
-        self.assertEqual(summary["liked"], 0)
+        assert summary["skipped"] == 1
+        assert summary["replied"] == 0
+        assert summary["liked"] == 0
 
     def test_new_comment_is_processed(self):
         """New comment not in responded_comments.json must be liked and replied to."""
@@ -104,10 +105,10 @@ class TestOwnPostResponderDedup(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertEqual(summary["replied"], 1)
+        assert summary["replied"] == 1
         # Verify comment is now marked as responded
         responded_ids = responder.load_responded_ids()
-        self.assertIn("newcode", responded_ids)
+        assert "newcode" in responded_ids
 
     def test_comment_without_numeric_id_is_not_skipped(self):
         """Regression: API returns id_code but NO numeric id — must NOT be skipped."""
@@ -127,9 +128,9 @@ class TestOwnPostResponderDedup(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertEqual(summary["replied"], 1)
+        assert summary["replied"] == 1
         responded_ids = responder.load_responded_ids()
-        self.assertIn("34ohb", responded_ids)
+        assert "34ohb" in responded_ids
 
     def test_own_comment_is_skipped_and_marked(self):
         """Our own comments should be skipped and marked to avoid re-checking."""
@@ -143,10 +144,10 @@ class TestOwnPostResponderDedup(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertEqual(summary["replied"], 0)
+        assert summary["replied"] == 0
         # Own comment should be marked responded so it won't be checked again
         responded_ids = responder.load_responded_ids()
-        self.assertIn("owncode", responded_ids)
+        assert "owncode" in responded_ids
 
 
 class TestOwnPostResponderQualityGate(unittest.TestCase):
@@ -179,7 +180,7 @@ class TestOwnPostResponderQualityGate(unittest.TestCase):
         summary = responder.run()
 
         # Reply rejected — reply count stays at 0
-        self.assertEqual(summary["replied"], 0)
+        assert summary["replied"] == 0
 
     def test_specific_reply_passes_quality_gate(self):
         """Specific 1-sentence reply must pass the quality gate."""
@@ -196,7 +197,7 @@ class TestOwnPostResponderQualityGate(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertEqual(summary["replied"], 1)
+        assert summary["replied"] == 1
 
     def test_validate_reply_rejects_multiple_generic_phrases(self):
         """Each individual generic phrase must be caught."""
@@ -210,29 +211,24 @@ class TestOwnPostResponderQualityGate(unittest.TestCase):
         ]
         for text in generic_cases:
             with self.subTest(text=text):
-                self.assertFalse(
-                    responder._validate_reply(text),
-                    f"Expected quality gate to reject: '{text}'",
-                )
+                assert not responder._validate_reply(text), f"Expected quality gate to reject: '{text}'"
 
     def test_validate_reply_rejects_self_promotion(self):
         """Self-promotion terms must be caught."""
         responder = self._make_responder(lambda b, t: "")
-        self.assertFalse(
-            responder._validate_reply("Check out my article on Netanel for more.")
-        )
+        assert not responder._validate_reply("Check out my article on Netanel for more.")
 
     def test_validate_reply_rejects_too_long(self):
         """Reply over 280 chars must be rejected."""
         responder = self._make_responder(lambda b, t: "")
         long_text = "A" * 281
-        self.assertFalse(responder._validate_reply(long_text))
+        assert not responder._validate_reply(long_text)
 
     def test_validate_reply_rejects_three_sentences(self):
         """Reply with three sentences must be rejected."""
         responder = self._make_responder(lambda b, t: "")
         three_sent = "This is sentence one. This is sentence two. This is sentence three."
-        self.assertFalse(responder._validate_reply(three_sent))
+        assert not responder._validate_reply(three_sent)
 
 
 class TestOwnPostResponderNoComments(unittest.TestCase):
@@ -248,7 +244,10 @@ class TestOwnPostResponderNoComments(unittest.TestCase):
     def _make_responder(self):
         mock_client = MagicMock()
         mock_browser = MagicMock()
-        llm_fn = lambda body, title: "That is a solid point about the internals."
+
+        def llm_fn(body, title):
+            return "That is a solid point about the internals."
+
         return OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
 
     def test_no_articles_returns_zero_summary(self):
@@ -258,9 +257,9 @@ class TestOwnPostResponderNoComments(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertEqual(summary["articles_checked"], 0)
-        self.assertEqual(summary["replied"], 0)
-        self.assertIn("elapsed_seconds", summary)
+        assert summary["articles_checked"] == 0
+        assert summary["replied"] == 0
+        assert "elapsed_seconds" in summary
 
     def test_no_comments_on_articles_returns_zero_summary(self):
         """When all articles have no comments, run() completes cleanly."""
@@ -272,8 +271,8 @@ class TestOwnPostResponderNoComments(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertEqual(summary["comments_found"], 0)
-        self.assertEqual(summary["replied"], 0)
+        assert summary["comments_found"] == 0
+        assert summary["replied"] == 0
 
 
 class TestOwnPostResponderAPIFailure(unittest.TestCase):
@@ -287,10 +286,13 @@ class TestOwnPostResponderAPIFailure(unittest.TestCase):
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
     def _make_responder(self):
-        from growth.client import DevToError
+        from growth.client import DevToError  # noqa: F401
         mock_client = MagicMock()
         mock_browser = MagicMock()
-        llm_fn = lambda body, title: "Solid insight about that particular approach."
+
+        def llm_fn(body, title):
+            return "Solid insight about that particular approach."
+
         return OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
 
     def test_fetch_own_articles_api_failure_does_not_crash(self):
@@ -302,7 +304,7 @@ class TestOwnPostResponderAPIFailure(unittest.TestCase):
 
         # Must not raise
         summary = responder.run()
-        self.assertEqual(summary["articles_checked"], 0)
+        assert summary["articles_checked"] == 0
 
     def test_fetch_article_comments_api_failure_does_not_crash(self):
         """API failure in fetch_article_comments() must skip article without crashing."""
@@ -316,7 +318,7 @@ class TestOwnPostResponderAPIFailure(unittest.TestCase):
 
         # Must not raise
         summary = responder.run()
-        self.assertEqual(summary["replied"], 0)
+        assert summary["replied"] == 0
 
     def test_browser_reply_failure_does_not_crash(self):
         """Browser reply failure must be logged and handled without crashing."""
@@ -332,7 +334,7 @@ class TestOwnPostResponderAPIFailure(unittest.TestCase):
 
         # Must not raise
         summary = responder.run()
-        self.assertIn("replied", summary)
+        assert "replied" in summary
 
     def test_llm_failure_does_not_crash(self):
         """LLM exception must be caught, comment marked responded, cycle continues."""
@@ -353,7 +355,7 @@ class TestOwnPostResponderAPIFailure(unittest.TestCase):
 
         # Must not raise
         summary = responder.run()
-        self.assertEqual(summary["replied"], 0)
+        assert summary["replied"] == 0
 
 
 class TestOwnPostResponderStorage(unittest.TestCase):
@@ -369,14 +371,17 @@ class TestOwnPostResponderStorage(unittest.TestCase):
     def _make_responder(self):
         mock_client = MagicMock()
         mock_browser = MagicMock()
-        llm_fn = lambda b, t: "That is a specific and relevant observation."
+
+        def llm_fn(b, t):
+            return "That is a specific and relevant observation."
+
         return OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
 
     def test_load_from_missing_file_returns_empty_set(self):
         """load_responded_ids() returns empty set when file does not exist."""
         responder = self._make_responder()
         result = responder.load_responded_ids()
-        self.assertEqual(result, set())
+        assert result == set()
 
     def test_load_from_corrupted_file_returns_empty_set(self):
         """load_responded_ids() returns empty set for corrupted JSON."""
@@ -384,7 +389,7 @@ class TestOwnPostResponderStorage(unittest.TestCase):
         path.write_text("{not valid json")
         responder = self._make_responder()
         result = responder.load_responded_ids()
-        self.assertEqual(result, set())
+        assert result == set()
 
     def test_save_and_reload_ids(self):
         """IDs saved via save_responded_ids() must round-trip through load."""
@@ -392,7 +397,7 @@ class TestOwnPostResponderStorage(unittest.TestCase):
         ids = {"abc", "def", "ghi"}
         responder.save_responded_ids(ids)
         loaded = responder.load_responded_ids()
-        self.assertEqual(loaded, ids)
+        assert loaded == ids
 
     def test_save_is_bounded_to_5000(self):
         """save_responded_ids() must cap at 5,000 entries."""
@@ -400,7 +405,7 @@ class TestOwnPostResponderStorage(unittest.TestCase):
         ids = {str(i) for i in range(6000)}
         responder.save_responded_ids(ids)
         loaded = responder.load_responded_ids()
-        self.assertLessEqual(len(loaded), 5000)
+        assert len(loaded) <= 5000
 
 
 class TestOwnPostResponderCommenterLimit(unittest.TestCase):
@@ -419,7 +424,8 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
         mock_browser.like_comment.return_value = True
         mock_browser.reply_to_comment.return_value = {"status": "replied"}
         if llm_fn is None:
-            llm_fn = lambda body, title: "Interesting take on that specific pattern."
+            def llm_fn(body, title):  # noqa: E306
+                return "Interesting take on that specific pattern."
         return OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
 
     def test_multiple_comments_same_user_same_article_respects_limit(self):
@@ -442,13 +448,13 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
         summary = responder.run()
 
         # alice gets exactly MAX_REPLIES_PER_COMMENTER (3) replies
-        self.assertEqual(summary["replied"], MAX_REPLIES_PER_COMMENTER)
+        assert summary["replied"] == MAX_REPLIES_PER_COMMENTER
         # The remaining 2 comments are skipped
-        self.assertEqual(summary["skipped"], 5 - MAX_REPLIES_PER_COMMENTER)
+        assert summary["skipped"] == 5 - MAX_REPLIES_PER_COMMENTER
         # alice recorded in replied_per_article.json with count = MAX_REPLIES_PER_COMMENTER
         replied = responder.load_replied_per_article()
-        self.assertIn("alice", replied.get("1", {}))
-        self.assertEqual(replied["1"]["alice"], MAX_REPLIES_PER_COMMENTER)
+        assert "alice" in replied.get("1", {})
+        assert replied["1"]["alice"] == MAX_REPLIES_PER_COMMENTER
 
     def test_same_user_different_articles_both_get_replies(self):
         """A user may receive replies per article — restriction is per-article."""
@@ -467,10 +473,10 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertEqual(summary["replied"], 2)
+        assert summary["replied"] == 2
         replied = responder.load_replied_per_article()
-        self.assertIn("bob", replied.get("1", {}))
-        self.assertIn("bob", replied.get("2", {}))
+        assert "bob" in replied.get("1", {})
+        assert "bob" in replied.get("2", {})
 
     def test_cross_run_persistence_blocks_reply_at_limit(self):
         """Cross-run: a pre-populated replied_per_article.json at max count prevents further replies."""
@@ -492,8 +498,8 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
         summary = responder.run()
 
         # No reply — alice is at MAX_REPLIES_PER_COMMENTER
-        self.assertEqual(summary["replied"], 0)
-        self.assertEqual(summary["skipped"], 1)
+        assert summary["replied"] == 0
+        assert summary["skipped"] == 1
 
     def test_user_with_count_zero_gets_first_reply(self):
         """A user with no prior reply count (count=0) is under the limit and gets a reply."""
@@ -514,13 +520,13 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
         summary = responder.run()
 
         # count=0 < MAX_REPLIES_PER_COMMENTER=1, so a reply IS sent
-        self.assertEqual(summary["replied"], 1)
+        assert summary["replied"] == 1
         replied = responder.load_replied_per_article()
         # Count should now be 1 (0 cross-run + 1 in-run)
-        self.assertEqual(replied["1"]["alice"], MAX_REPLIES_PER_COMMENTER)
+        assert replied["1"]["alice"] == MAX_REPLIES_PER_COMMENTER
 
     def test_user_with_count_3_gets_no_reply(self):
-        """A user with count=3 (at MAX_REPLIES_PER_COMMENTER) gets no further replies."""
+        """A user at MAX_REPLIES_PER_COMMENTER gets no further replies."""
         from growth.responder import MAX_REPLIES_PER_COMMENTER
 
         replied_path = self.data_dir / "replied_per_article.json"
@@ -536,8 +542,8 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertEqual(summary["replied"], 0)
-        self.assertEqual(summary["skipped"], 1)
+        assert summary["replied"] == 0
+        assert summary["skipped"] == 1
 
     def test_backward_compat_list_format_loaded_as_fully_used(self):
         """Legacy list format on disk is loaded without error as fully-used entries."""
@@ -551,9 +557,9 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
         loaded = responder.load_replied_per_article()
 
         # Must parse without error and treat legacy entry as fully used up
-        self.assertIn("3321258", loaded)
-        self.assertIn("nyrok", loaded["3321258"])
-        self.assertEqual(loaded["3321258"]["nyrok"], MAX_REPLIES_PER_COMMENTER)
+        assert "3321258" in loaded
+        assert "nyrok" in loaded["3321258"]
+        assert loaded["3321258"]["nyrok"] == MAX_REPLIES_PER_COMMENTER
 
     def test_backward_compat_list_format_blocks_reply_on_next_run(self):
         """After loading legacy list format, commenter is correctly blocked on the next run."""
@@ -573,8 +579,8 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
         summary = responder.run()
 
         # No reply — alice is treated as having MAX_REPLIES_PER_COMMENTER from the legacy list
-        self.assertEqual(summary["replied"], 0)
-        self.assertEqual(summary["skipped"], 1)
+        assert summary["replied"] == 0
+        assert summary["skipped"] == 1
 
     def test_replied_per_article_written_atomically_and_bounded(self):
         """save_replied_per_article caps at MAX_REPLIED_ARTICLES=500 and uses atomic write."""
@@ -586,19 +592,19 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
         responder.save_replied_per_article(large_replied)
 
         loaded = responder.load_replied_per_article()
-        self.assertLessEqual(len(loaded), MAX_REPLIED_ARTICLES)
+        assert len(loaded) <= MAX_REPLIED_ARTICLES
 
     def test_load_replied_per_article_missing_file_returns_empty(self):
         """load_replied_per_article() returns {} when file does not exist."""
         responder = self._make_responder()
-        self.assertEqual(responder.load_replied_per_article(), {})
+        assert responder.load_replied_per_article() == {}
 
     def test_load_replied_per_article_corrupted_file_returns_empty(self):
         """load_replied_per_article() returns {} for corrupted JSON."""
         path = self.data_dir / "replied_per_article.json"
         path.write_text("{not valid json")
         responder = self._make_responder()
-        self.assertEqual(responder.load_replied_per_article(), {})
+        assert responder.load_replied_per_article() == {}
 
 
 class TestOwnPostResponderTrollDetection(unittest.TestCase):
@@ -617,7 +623,8 @@ class TestOwnPostResponderTrollDetection(unittest.TestCase):
         mock_browser.like_comment.return_value = True
         mock_browser.reply_to_comment.return_value = {"status": "replied"}
         if llm_fn is None:
-            llm_fn = lambda body, title: "Good point about that specific mechanism."
+            def llm_fn(body, title):  # noqa: E306
+                return "Good point about that specific mechanism."
         return OwnPostResponder(
             mock_client, self.config, mock_browser, llm_fn,
             troll_detect_fn=troll_detect_fn,
@@ -636,9 +643,9 @@ class TestOwnPostResponderTrollDetection(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertEqual(summary["liked"], 0)
-        self.assertEqual(summary["replied"], 0)
-        self.assertEqual(summary["trolls_skipped"], 1)
+        assert summary["liked"] == 0
+        assert summary["replied"] == 0
+        assert summary["trolls_skipped"] == 1
         # Browser must not have been called for like or reply
         responder.browser.like_comment.assert_not_called()
         responder.browser.reply_to_comment.assert_not_called()
@@ -656,7 +663,7 @@ class TestOwnPostResponderTrollDetection(unittest.TestCase):
         responder.run()
 
         responded_ids = responder.load_responded_ids()
-        self.assertIn("t002", responded_ids)
+        assert "t002" in responded_ids
 
     def test_troll_comment_logged_as_skip_troll(self):
         """Troll comment must produce an engagement_log.jsonl entry with action=skip_troll."""
@@ -671,11 +678,11 @@ class TestOwnPostResponderTrollDetection(unittest.TestCase):
         responder.run()
 
         log_path = self.data_dir / "engagement_log.jsonl"
-        self.assertTrue(log_path.exists(), "engagement_log.jsonl must be created")
+        assert log_path.exists(), "engagement_log.jsonl must be created"
         entries = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
         troll_entries = [e for e in entries if e.get("action") == "skip_troll"]
-        self.assertEqual(len(troll_entries), 1)
-        self.assertEqual(troll_entries[0]["comment_id"], "t003")
+        assert len(troll_entries) == 1
+        assert troll_entries[0]["comment_id"] == "t003"
 
     def test_genuine_comment_not_flagged_when_troll_detect_returns_false(self):
         """A genuine comment where troll_detect_fn returns False must be processed normally."""
@@ -689,8 +696,8 @@ class TestOwnPostResponderTrollDetection(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertEqual(summary["replied"], 1)
-        self.assertEqual(summary["trolls_skipped"], 0)
+        assert summary["replied"] == 1
+        assert summary["trolls_skipped"] == 0
 
     def test_no_troll_detect_fn_means_all_comments_pass(self):
         """When troll_detect_fn is None (default), troll detection is disabled."""
@@ -704,8 +711,8 @@ class TestOwnPostResponderTrollDetection(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertEqual(summary["replied"], 1)
-        self.assertEqual(summary["trolls_skipped"], 0)
+        assert summary["replied"] == 1
+        assert summary["trolls_skipped"] == 0
 
     def test_troll_detect_fn_exception_is_safe_default(self):
         """An exception in troll_detect_fn must not crash the cycle — defaults to non-troll."""
@@ -722,14 +729,12 @@ class TestOwnPostResponderTrollDetection(unittest.TestCase):
 
         # Must not raise — exception in detector is caught safely
         summary = responder.run()
-        self.assertEqual(summary["trolls_skipped"], 0)
+        assert summary["trolls_skipped"] == 0
         # Comment proceeds normally (safe default = non-troll)
-        self.assertEqual(summary["replied"], 1)
+        assert summary["replied"] == 1
 
     def test_mixed_troll_and_genuine_comments_processed_correctly(self):
         """In a batch with mixed comments, trolls are skipped and genuine ones replied to."""
-        call_count = 0
-
         def selective_detector(body):
             return "fraud" in body.lower() or "idiot" in body.lower()
 
@@ -745,8 +750,8 @@ class TestOwnPostResponderTrollDetection(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertEqual(summary["replied"], 2)
-        self.assertEqual(summary["trolls_skipped"], 1)
+        assert summary["replied"] == 2
+        assert summary["trolls_skipped"] == 1
 
     def test_summary_includes_trolls_skipped_key(self):
         """run() summary dict must always contain trolls_skipped key."""
@@ -755,7 +760,7 @@ class TestOwnPostResponderTrollDetection(unittest.TestCase):
 
         summary = responder.run()
 
-        self.assertIn("trolls_skipped", summary)
+        assert "trolls_skipped" in summary
 
 
 class TestOurRepliesStorage(unittest.TestCase):
@@ -771,14 +776,17 @@ class TestOurRepliesStorage(unittest.TestCase):
     def _make_responder(self):
         mock_client = MagicMock()
         mock_browser = MagicMock()
-        llm_fn = lambda b, t: "That is a specific and relevant observation."
+
+        def llm_fn(b, t):
+            return "That is a specific and relevant observation."
+
         return OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
 
     def test_load_our_replies_missing_file_returns_empty_dict(self):
         """load_our_replies() returns {} when our_replies.json does not exist."""
         responder = self._make_responder()
         result = responder.load_our_replies()
-        self.assertEqual(result, {})
+        assert result == {}
 
     def test_load_our_replies_corrupted_file_returns_empty_dict(self):
         """load_our_replies() returns {} for corrupted JSON."""
@@ -786,7 +794,7 @@ class TestOurRepliesStorage(unittest.TestCase):
         path.write_text("{not valid json")
         responder = self._make_responder()
         result = responder.load_our_replies()
-        self.assertEqual(result, {})
+        assert result == {}
 
     def test_load_our_replies_wrong_type_returns_empty_dict(self):
         """load_our_replies() returns {} if file contains a list instead of dict."""
@@ -794,7 +802,7 @@ class TestOurRepliesStorage(unittest.TestCase):
         path.write_text(json.dumps(["abc", "def"]))
         responder = self._make_responder()
         result = responder.load_our_replies()
-        self.assertEqual(result, {})
+        assert result == {}
 
     def test_save_our_reply_creates_file_and_round_trips(self):
         """save_our_reply() writes to our_replies.json and load_our_replies() reads it back."""
@@ -806,10 +814,10 @@ class TestOurRepliesStorage(unittest.TestCase):
             article_id=42,
         )
         loaded = responder.load_our_replies()
-        self.assertIn("reply1", loaded)
-        self.assertEqual(loaded["reply1"]["parent_id_code"], "parent1")
-        self.assertEqual(loaded["reply1"]["article_url"], "https://dev.to/user/article")
-        self.assertEqual(loaded["reply1"]["article_id"], 42)
+        assert "reply1" in loaded
+        assert loaded["reply1"]["parent_id_code"] == "parent1"
+        assert loaded["reply1"]["article_url"] == "https://dev.to/user/article"
+        assert loaded["reply1"]["article_id"] == 42
 
     def test_save_our_reply_accumulates_multiple_entries(self):
         """Multiple calls to save_our_reply() accumulate entries in the file."""
@@ -817,9 +825,9 @@ class TestOurRepliesStorage(unittest.TestCase):
         responder.save_our_reply("r1", "p1", "https://dev.to/u/a1", 1)
         responder.save_our_reply("r2", "p2", "https://dev.to/u/a2", 2)
         loaded = responder.load_our_replies()
-        self.assertIn("r1", loaded)
-        self.assertIn("r2", loaded)
-        self.assertEqual(len(loaded), 2)
+        assert "r1" in loaded
+        assert "r2" in loaded
+        assert len(loaded) == 2
 
     def test_load_our_replies_skips_malformed_entries(self):
         """load_our_replies() silently skips entries with missing required fields."""
@@ -831,8 +839,8 @@ class TestOurRepliesStorage(unittest.TestCase):
         }))
         responder = self._make_responder()
         loaded = responder.load_our_replies()
-        self.assertIn("good", loaded)
-        self.assertNotIn("bad", loaded)
+        assert "good" in loaded
+        assert "bad" not in loaded
 
 
 class TestCollectAllIdCodes(unittest.TestCase):
@@ -848,7 +856,10 @@ class TestCollectAllIdCodes(unittest.TestCase):
     def _make_responder(self):
         mock_client = MagicMock()
         mock_browser = MagicMock()
-        llm_fn = lambda b, t: "Specific and relevant."
+
+        def llm_fn(b, t):
+            return "Specific and relevant."
+
         return OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
 
     def test_flat_list_collects_all_id_codes(self):
@@ -859,7 +870,7 @@ class TestCollectAllIdCodes(unittest.TestCase):
             {"id_code": "a2", "children": []},
         ]
         result = responder._collect_all_id_codes(comments)
-        self.assertEqual(result, {"a1", "a2"})
+        assert result == {"a1", "a2"}
 
     def test_nested_children_collected(self):
         """Nested children at arbitrary depth are collected."""
@@ -878,19 +889,19 @@ class TestCollectAllIdCodes(unittest.TestCase):
             },
         ]
         result = responder._collect_all_id_codes(comments)
-        self.assertEqual(result, {"root", "child1", "grandchild1"})
+        assert result == {"root", "child1", "grandchild1"}
 
     def test_empty_list_returns_empty_set(self):
         """Empty comment list returns empty set."""
         responder = self._make_responder()
-        self.assertEqual(responder._collect_all_id_codes([]), set())
+        assert responder._collect_all_id_codes([]) == set()
 
     def test_comment_without_id_code_is_skipped(self):
         """Comments missing id_code are not added to the set."""
         responder = self._make_responder()
         comments = [{"body_html": "no id code here", "children": []}]
         result = responder._collect_all_id_codes(comments)
-        self.assertEqual(result, set())
+        assert result == set()
 
 
 class TestCleanOrphanedReplies(unittest.TestCase):
@@ -908,14 +919,15 @@ class TestCleanOrphanedReplies(unittest.TestCase):
         mock_browser = MagicMock()
         mock_browser.delete_comment.return_value = True
         if llm_fn is None:
-            llm_fn = lambda b, t: "Good point about that specific aspect."
+            def llm_fn(b, t):  # noqa: E306
+                return "Good point about that specific aspect."
         return OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
 
     def test_no_tracked_replies_returns_zero(self):
         """clean_orphaned_replies() returns 0 when our_replies.json is empty/missing."""
         responder = self._make_responder()
         result = responder.clean_orphaned_replies()
-        self.assertEqual(result, 0)
+        assert result == 0
         responder.browser.delete_comment.assert_not_called()
 
     def test_parent_still_exists_no_deletion(self):
@@ -929,7 +941,7 @@ class TestCleanOrphanedReplies(unittest.TestCase):
         ]
 
         result = responder.clean_orphaned_replies()
-        self.assertEqual(result, 0)
+        assert result == 0
         responder.browser.delete_comment.assert_not_called()
 
     def test_parent_missing_triggers_deletion(self):
@@ -943,7 +955,7 @@ class TestCleanOrphanedReplies(unittest.TestCase):
         ]
 
         result = responder.clean_orphaned_replies()
-        self.assertEqual(result, 1)
+        assert result == 1
         responder.browser.delete_comment.assert_called_once_with(
             "our1", "https://dev.to/u/a"
         )
@@ -959,7 +971,7 @@ class TestCleanOrphanedReplies(unittest.TestCase):
         responder.clean_orphaned_replies()
 
         remaining = responder.load_our_replies()
-        self.assertNotIn("our1", remaining)
+        assert "our1" not in remaining
 
     def test_failed_deletion_keeps_entry_in_our_replies_json(self):
         """If delete fails, the entry stays in our_replies.json for next run retry."""
@@ -973,10 +985,10 @@ class TestCleanOrphanedReplies(unittest.TestCase):
         result = responder.clean_orphaned_replies()
 
         # Count is 0 — deletion failed
-        self.assertEqual(result, 0)
+        assert result == 0
         # Entry stays for retry
         remaining = responder.load_our_replies()
-        self.assertIn("our1", remaining)
+        assert "our1" in remaining
 
     def test_cap_at_max_orphan_deletions_per_run(self):
         """clean_orphaned_replies() deletes at most MAX_ORPHAN_DELETIONS_PER_RUN replies."""
@@ -994,7 +1006,7 @@ class TestCleanOrphanedReplies(unittest.TestCase):
         responder.client.get_article_comments.return_value = []
 
         result = responder.clean_orphaned_replies()
-        self.assertLessEqual(result, MAX_ORPHAN_DELETIONS_PER_RUN)
+        assert result <= MAX_ORPHAN_DELETIONS_PER_RUN
 
     def test_deletion_logged_to_engagement_log(self):
         """Each orphan deletion is recorded in engagement_log.jsonl."""
@@ -1007,15 +1019,15 @@ class TestCleanOrphanedReplies(unittest.TestCase):
         responder.clean_orphaned_replies()
 
         log_path = self.data_dir / "engagement_log.jsonl"
-        self.assertTrue(log_path.exists(), "engagement_log.jsonl must be created")
+        assert log_path.exists(), "engagement_log.jsonl must be created"
         entries = [
             json.loads(line)
             for line in log_path.read_text().splitlines()
             if line.strip()
         ]
         orphan_entries = [e for e in entries if e.get("action") == "delete_orphaned_reply"]
-        self.assertEqual(len(orphan_entries), 1)
-        self.assertEqual(orphan_entries[0]["comment_id"], "our1")
+        assert len(orphan_entries) == 1
+        assert orphan_entries[0]["comment_id"] == "our1"
 
     def test_browser_delete_exception_is_non_fatal(self):
         """Exception raised by browser.delete_comment() does not crash the cycle."""
@@ -1028,7 +1040,7 @@ class TestCleanOrphanedReplies(unittest.TestCase):
 
         # Must not raise
         result = responder.clean_orphaned_replies()
-        self.assertEqual(result, 0)
+        assert result == 0
 
     def test_multiple_articles_fetch_comments_once_each(self):
         """Comments are fetched once per article, not once per tracked reply."""
@@ -1043,7 +1055,7 @@ class TestCleanOrphanedReplies(unittest.TestCase):
         responder.clean_orphaned_replies()
 
         # get_article_comments called twice (once per article), not three times
-        self.assertEqual(responder.client.get_article_comments.call_count, 2)
+        assert responder.client.get_article_comments.call_count == 2
 
     def test_parent_in_nested_child_not_treated_as_orphan(self):
         """A parent that is a nested child in the tree is NOT treated as orphaned."""
@@ -1064,14 +1076,17 @@ class TestCleanOrphanedReplies(unittest.TestCase):
         ]
 
         result = responder.clean_orphaned_replies()
-        self.assertEqual(result, 0)
+        assert result == 0
         responder.browser.delete_comment.assert_not_called()
 
     def test_browser_without_delete_comment_does_not_crash(self):
         """If browser lacks delete_comment(), clean_orphaned_replies() logs and continues."""
         mock_client = MagicMock()
         mock_browser = MagicMock(spec=[])  # spec=[] means no attributes
-        llm_fn = lambda b, t: "Specific point."
+
+        def llm_fn(b, t):
+            return "Specific point."
+
         responder = OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
 
         responder.save_our_reply("our1", "parent1", "https://dev.to/u/a", 10)
@@ -1079,20 +1094,23 @@ class TestCleanOrphanedReplies(unittest.TestCase):
 
         # Must not raise
         result = responder.clean_orphaned_replies()
-        self.assertEqual(result, 0)
+        assert result == 0
 
     def test_run_summary_includes_orphans_cleaned_key(self):
         """run() summary dict must always contain orphans_cleaned key."""
         mock_client = MagicMock()
         mock_browser = MagicMock()
         mock_browser.delete_comment.return_value = True
-        llm_fn = lambda b, t: "Specific and relevant."
+
+        def llm_fn(b, t):
+            return "Specific and relevant."
+
         responder = OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
         responder.client.get_articles_by_username.return_value = []
 
         summary = responder.run()
 
-        self.assertIn("orphans_cleaned", summary)
+        assert "orphans_cleaned" in summary
 
     def test_run_calls_clean_orphaned_replies_before_new_comments(self):
         """run() invokes clean_orphaned_replies() before processing new comments."""
@@ -1110,7 +1128,7 @@ class TestCleanOrphanedReplies(unittest.TestCase):
         summary = responder.run()
 
         # Orphan cleaned
-        self.assertGreater(summary["orphans_cleaned"], 0)
+        assert summary["orphans_cleaned"] > 0
         responder.browser.delete_comment.assert_called()
 
 
