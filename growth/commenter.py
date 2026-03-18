@@ -14,12 +14,13 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 
 from growth.browser import DevToBrowser
 from growth.client import DevToClient, DevToError
 from growth.config import GrowthConfig
-from growth.storage import load_json_ids, save_json_ids
+from growth.learner import GrowthLearner
+from growth.schema import build_engagement_entry
+from growth.storage import atomic_trim_jsonl, load_json_ids, save_json_ids
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,50 @@ class CommentEngine:
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load comment_history.jsonl: %s", e)
         return entries
+
+    def get_learnings_context(self, max_learnings: int = 5) -> list[str]:
+        """Return top learnings as bullet-point strings for LLM prompt injection.
+
+        Callers (e.g. nathan-team comment scripts) should inject the returned
+        list into their system or user prompt so the LLM writes comments that
+        reflect what has historically worked well.
+
+        Safe: any exception from the learner returns an empty list so the
+        comment cycle continues unaffected.
+
+        Returns:
+            list[str]: each item is a bullet-point learning string,
+                       e.g. ["- tag 'python' yields high engagement (confidence: 0.85)"].
+                       Empty list if no learnings or on any error.
+        """
+        try:
+            learner = GrowthLearner(self.config)
+            insights = learner.get_insights_for_prompt(max_insights=max_learnings)
+            if insights:
+                logger.info("Learner context: %d insights for prompt.", len(insights))
+            return insights
+        except Exception:
+            logger.exception("GrowthLearner.get_insights_for_prompt() raised — no context injected.")
+            return []
+
+    def run_learner_analyze(self) -> None:
+        """Run GrowthLearner.analyze() after a comment cycle completes.
+
+        Callers should invoke this once after all comments in a cycle are posted
+        so that engagement patterns are extracted and stored for future cycles.
+
+        Safe: any exception is logged and silently swallowed so the
+        cycle result is never affected by learner errors.
+        """
+        try:
+            learner = GrowthLearner(self.config)
+            new_learnings = learner.analyze()
+            logger.info(
+                "GrowthLearner.analyze() complete: %d new learnings after comment cycle.",
+                len(new_learnings),
+            )
+        except Exception:
+            logger.exception("GrowthLearner.analyze() raised after comment cycle — continuing.")
 
     def post_comment(
         self,
@@ -150,13 +195,14 @@ class CommentEngine:
             logger.warning("Empty comment rejected.")
             return False
 
-        # Must be short (1-2 sentences, roughly under 280 chars)
-        if len(body) > 280:
-            logger.warning("Comment too long (%d chars). Max 280.", len(body))
+        # Must be short (2-4 sentences, roughly under 600 chars; D4 upgrade)
+        if len(body) > 600:
+            logger.warning("Comment too long (%d chars). Max 600.", len(body))
             return False
 
-        # Must be 1-2 sentences
-        sentences = [s for s in re.split(r"[.!?]+", body) if s.strip()]
+        # Must be 1-2 sentences (focused, lower risk of over-commenting)
+        # Use lookbehind to avoid splitting on abbreviations (e.g. "Dr. Smith")
+        sentences = [s for s in re.split(r'(?<=[.!?])\s+', body) if s.strip()]
         if not (1 <= len(sentences) <= 2):
             logger.warning("Comment must be 1-2 sentences (found %d).", len(sentences))
             return False
@@ -175,7 +221,8 @@ class CommentEngine:
         ]
         body_lower = body.lower()
         for phrase in generic_phrases:
-            if phrase in body_lower:
+            pattern = r'\b' + re.escape(phrase) + r'\b'
+            if re.search(pattern, body_lower):
                 logger.warning("Generic phrase detected: '%s'", phrase)
                 return False
 
@@ -195,6 +242,8 @@ class CommentEngine:
         article_title: str,
         author: str,
         api_result: dict,
+        comment_template_category: str | None = None,
+        comment_has_question: bool | None = None,
     ) -> None:
         """Log comment details for performance tracking by learner."""
         path = self.data_dir / "comment_history.jsonl"
@@ -207,6 +256,8 @@ class CommentEngine:
             "comment_text": body,
             "comment_id": api_result.get("id_code", ""),
             "char_count": len(body),
+            "comment_template_category": comment_template_category,
+            "comment_has_question": comment_has_question,
         }
         with open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
@@ -218,37 +269,43 @@ class CommentEngine:
         article_title: str,
         author: str,
         method: str = "api",
+        cycle_id: str | None = None,
+        comment_template_category: str | None = None,
+        comment_has_question: bool | None = None,
     ) -> None:
-        """Append to shared engagement_log.jsonl."""
+        """Append to shared engagement_log.jsonl with enhanced X1 schema."""
         path = self.data_dir / "engagement_log.jsonl"
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "action": "comment",
-            "article_id": article_id,
-            "article_title": article_title[:100],
-            "author": author,
-            "comment_length": len(body),
-            "method": method,
-        }
+        entry = build_engagement_entry(
+            action="comment",
+            platform="devto",
+            target_username=author,
+            target_post_id=str(article_id),
+            target_followers_at_engagement=None,  # Populated when scout targeting ships
+            target_post_reactions_at_engagement=None,
+            target_post_age_hours=None,
+            comment_template_category=comment_template_category,
+            comment_has_question=comment_has_question,
+            cycle_id=cycle_id,
+            # Existing fields preserved
+            article_id=article_id,
+            article_title=article_title[:100],
+            author_username=author,
+            comment_length=len(body),
+            method=method,
+        )
         with open(path, "a") as f:
             f.write(json.dumps(entry) + "\n")
-        # Periodic trim after each write to prevent unbounded growth
-        self.trim_engagement_log()
+        # NOTE: Do NOT trim here — trim is O(N) and should be called once per cycle,
+        # not per comment (which would be O(N^2)). Call trim_engagement_log() once
+        # after all comments in a cycle are posted.
 
     def trim_engagement_log(self) -> None:
-        """Trim engagement log to max_engagement_log entries.
+        """Trim engagement log to max_engagement_log entries. Atomic write.
 
-        Prevents unbounded growth. Same logic as ReactionEngine.
+        Prevents unbounded growth. Delegates to storage.atomic_trim_jsonl.
         """
-        path = self.data_dir / "engagement_log.jsonl"
-        if not path.exists():
-            return
-        lines = path.read_text().strip().split("\n")
-        if len(lines) > self.config.max_engagement_log:
-            trimmed = lines[-self.config.max_engagement_log:]
-            path.write_text("\n".join(trimmed) + "\n")
-            logger.info(
-                "Trimmed engagement log: %d -> %d entries.",
-                len(lines), len(trimmed),
-            )
+        atomic_trim_jsonl(
+            self.data_dir / "engagement_log.jsonl",
+            self.config.max_engagement_log,
+        )
