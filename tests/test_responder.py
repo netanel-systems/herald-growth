@@ -430,7 +430,7 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
         responder.client.get_articles_by_username.return_value = [
             _make_article(1, "My Article", "https://dev.to/testuser/my-article")
         ]
-        # alice posts 5 comments; limit is MAX_REPLIES_PER_COMMENTER (3)
+        # alice posts 5 comments; limit is MAX_REPLIES_PER_COMMENTER
         responder.client.get_article_comments.return_value = [
             _make_comment("c001", "alice", "First comment by alice."),
             _make_comment("c002", "alice", "Second comment by alice."),
@@ -495,28 +495,28 @@ class TestOwnPostResponderCommenterLimit(unittest.TestCase):
         self.assertEqual(summary["replied"], 0)
         self.assertEqual(summary["skipped"], 1)
 
-    def test_user_with_count_2_gets_third_reply(self):
-        """A user with count=2 in the cross-run map is under the limit and gets a reply."""
+    def test_user_with_count_zero_gets_first_reply(self):
+        """A user with no prior reply count (count=0) is under the limit and gets a reply."""
         from growth.responder import MAX_REPLIES_PER_COMMENTER
 
-        # Pre-populate with alice at count=2 (below MAX_REPLIES_PER_COMMENTER=3)
+        # Pre-populate with alice at count=0 (below MAX_REPLIES_PER_COMMENTER=1)
         replied_path = self.data_dir / "replied_per_article.json"
-        replied_path.write_text(json.dumps({"1": {"alice": 2}}))
+        replied_path.write_text(json.dumps({"1": {"alice": 0}}))
 
         responder = self._make_responder()
         responder.client.get_articles_by_username.return_value = [
             _make_article(1, "My Article", "https://dev.to/testuser/my-article")
         ]
         responder.client.get_article_comments.return_value = [
-            _make_comment("c030", "alice", "Alice posts a new comment — count was 2."),
+            _make_comment("c030", "alice", "Alice posts a comment — count was 0."),
         ]
 
         summary = responder.run()
 
-        # count=2 < MAX_REPLIES_PER_COMMENTER=3, so a reply IS sent
+        # count=0 < MAX_REPLIES_PER_COMMENTER=1, so a reply IS sent
         self.assertEqual(summary["replied"], 1)
         replied = responder.load_replied_per_article()
-        # Count should now be 3 (2 cross-run + 1 in-run)
+        # Count should now be 1 (0 cross-run + 1 in-run)
         self.assertEqual(replied["1"]["alice"], MAX_REPLIES_PER_COMMENTER)
 
     def test_user_with_count_3_gets_no_reply(self):

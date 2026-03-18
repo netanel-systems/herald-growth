@@ -10,7 +10,7 @@ For each comment received on our own articles:
 Rules:
 - Max 1 reply per incoming comment. No thread continuation.
 - Never continue beyond the initial reply.
-- Max MAX_REPLIES_PER_COMMENTER replies per unique commenter per article across ALL cron runs.
+- Max 1 reply per unique commenter per article across ALL cron runs (MAX_REPLIES_PER_COMMENTER).
 - Troll comments are silently skipped — no like, no reply, marked processed.
 - Replies are specific to what the commenter said.
 - No self-promotion in replies.
@@ -43,7 +43,7 @@ ENGAGE_DELAY = 5.0
 # Maximum articles tracked in replied_per_article.json before rotating oldest
 MAX_REPLIED_ARTICLES = 500
 # Maximum replies we send to any single commenter on a given article (across all cron runs)
-MAX_REPLIES_PER_COMMENTER = 3
+MAX_REPLIES_PER_COMMENTER = 1
 # Safety cap: never delete more than this many orphaned replies per run
 MAX_ORPHAN_DELETIONS_PER_RUN = 10
 
