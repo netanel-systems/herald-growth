@@ -64,6 +64,46 @@ def atomic_write_json(path: Path, data: object) -> None:
         raise
 
 
+def atomic_trim_jsonl(path: Path, max_lines: int) -> None:
+    """Trim a JSONL file to at most max_lines entries. Atomic write.
+
+    Keeps the most recent entries (tail). No-op if the file does not exist
+    or already contains <= max_lines lines.
+
+    Prevents unbounded growth of append-only log files such as
+    ``engagement_log.jsonl``. Call once at the end of each cycle, not after
+    every append (O(N) not O(N²)).
+
+    Args:
+        path:      Path to the ``.jsonl`` file to trim.
+        max_lines: Maximum number of lines to retain.
+    """
+    if not path.exists():
+        return
+    lines = [line for line in path.read_text().strip().split("\n") if line.strip()]
+    if len(lines) <= max_lines:
+        return
+    trimmed = lines[-max_lines:]
+    content = "\n".join(trimmed) + "\n"
+    fd, tmp_path = tempfile.mkstemp(
+        dir=path.parent, suffix=".tmp", prefix=f".{path.stem}_",
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError as cleanup_err:
+            logger.warning(
+                "Failed to clean up temp file %s after trim error: %s",
+                tmp_path, cleanup_err,
+            )
+        raise
+    logger.info("Trimmed %s: %d -> %d entries.", path.name, len(lines), len(trimmed))
+
+
 def save_json_ids(
     path: Path, ids: set[int], max_count: int, key: str = "article_ids",
 ) -> None:

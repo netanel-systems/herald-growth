@@ -45,7 +45,7 @@ def fetch_random_tags(client: DevToClient, sample_size: int = TAGS_PER_CYCLE) ->
     if not all_tags:
         return []
 
-    sample = random.sample(all_tags, min(sample_size, len(all_tags)))
+    sample = random.sample(all_tags, min(sample_size, len(all_tags)))  # noqa: S311
     logger.info("Sampled %d random tags from %d available.", len(sample), len(all_tags))
     return sample
 

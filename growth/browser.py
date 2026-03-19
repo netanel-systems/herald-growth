@@ -891,7 +891,7 @@ class DevToBrowser:
             return None
 
         except BrowserLoginRequired:
-            logger.error("Cannot reply — login required.")
+            logger.error("Cannot reply — login required.")  # noqa: TRY400
             return None
         except PlaywrightTimeoutError:
             logger.warning(
@@ -900,7 +900,7 @@ class DevToBrowser:
             self._save_debug_screenshot(f"reply_timeout_{comment_id_code}")
             return None
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 "Unexpected browser error replying to comment %s: %s",
                 comment_id_code, exc,
             )
@@ -1015,7 +1015,7 @@ class DevToBrowser:
             return False
 
         except BrowserLoginRequired:
-            logger.error("Cannot like comment — login required.")
+            logger.error("Cannot like comment — login required.")  # noqa: TRY400
             return False
         except PlaywrightTimeoutError:
             logger.warning(
@@ -1024,8 +1024,265 @@ class DevToBrowser:
             self._save_debug_screenshot(f"like_timeout_{comment_id_code}")
             return False
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 "Unexpected browser error liking comment %s: %s",
+                comment_id_code, exc,
+            )
+            return False
+
+    # Delete comment selectors — verified from delete_comments.py screenshot analysis:
+    # Container: [data-path$="/comments/{id_code}"]
+    # Menu button: button[aria-label='Toggle dropdown menu'] (within container)
+    # Delete option: page.get_by_text("Delete", exact=True) — NOT :has-text() CSS pseudo
+    # Forem uses window.confirm() for delete confirmation.
+    SELS_DELETE_MENU_BUTTON = (
+        "button[aria-label='Toggle dropdown menu']",
+        "button.comment__toggle-dropdown",
+        "button[id^='comment-actions-trigger']",
+        ".comment__actions button",
+    )
+
+    def delete_comment(
+        self,
+        comment_id_code: str,
+        article_url: str,
+    ) -> bool:
+        """Delete one of our own comments via the Forem UI menu.
+
+        Navigates to the article page, finds the comment container by
+        ``[data-path$="/comments/{id_code}"]``, opens the "..." dropdown
+        menu, and clicks Delete. Forem uses window.confirm() for the
+        confirmation dialog — Playwright accepts it automatically.
+
+        Verified selector strategy from delete_comments.py screenshot
+        analysis (2026-03-14):
+        - Menu button: ``button[aria-label='Toggle dropdown menu']``
+        - Delete item: ``page.get_by_text("Delete", exact=True)``
+          NOT ``:has-text()`` which is invalid in Playwright's CSS engine.
+
+        Args:
+            comment_id_code: The ``id_code`` string of our comment to delete.
+            article_url: Full article URL where the comment lives.
+
+        Returns:
+            True on successful deletion (or confirmed dialog + DOM cleared),
+            False on any failure (logs reason + saves debug screenshot).
+        """
+        # Validate id_code — same guard as reply_to_comment() and like_comment()
+        if (
+            not isinstance(comment_id_code, str)
+            or not comment_id_code
+            or not comment_id_code.replace("-", "").replace("_", "").isalnum()
+        ):
+            logger.warning(
+                "Invalid comment_id_code for delete: %s", comment_id_code,
+            )
+            return False
+
+        if not article_url:
+            logger.warning(
+                "No article URL for deleting comment %s.", comment_id_code,
+            )
+            return False
+
+        try:
+            self.ensure_logged_in()
+            if self._page is None:
+                logger.error("Browser page not initialized for comment delete.")
+                return False
+
+            self._page.goto(article_url, wait_until="domcontentloaded")
+            self._human_delay(1.5, 2.5)
+
+            # Locate and scroll to the comment container
+            container_sel = f'[data-path$="/comments/{comment_id_code}"]'
+            try:
+                container = self._page.locator(container_sel).first
+                container.wait_for(state="visible", timeout=8000)
+                container.scroll_into_view_if_needed()
+                self._human_delay(0.5, 1.0)
+            except PlaywrightTimeoutError:
+                self._save_debug_screenshot(
+                    f"delete_container_not_found_{comment_id_code}"
+                )
+                logger.warning(
+                    "Comment container %s not found on page for delete.",
+                    comment_id_code,
+                )
+                return False
+
+            # Find the "..." dropdown menu button within the container
+            menu_btn = None
+            for sel in self.SELS_DELETE_MENU_BUTTON:
+                loc = container.locator(sel).first
+                try:
+                    if loc.is_visible(timeout=2000):
+                        menu_btn = loc
+                        logger.debug(
+                            "Delete menu button found via selector '%s' for "
+                            "comment %s.", sel, comment_id_code,
+                        )
+                        break
+                except PlaywrightTimeoutError:
+                    continue
+
+            if menu_btn is None:
+                self._save_debug_screenshot(
+                    f"delete_menu_not_found_{comment_id_code}"
+                )
+                logger.warning(
+                    "Comment action menu not found for %s.", comment_id_code,
+                )
+                return False
+
+            # Register dialog handler to auto-accept window.confirm("Are you sure?")
+            dialog_accepted = {"value": False}
+
+            def _handle_dialog(dialog) -> None:
+                logger.info(
+                    "Delete confirm dialog: type=%s, message=%r — accepting.",
+                    dialog.type, dialog.message,
+                )
+                dialog.accept()
+                dialog_accepted["value"] = True
+
+            self._page.on("dialog", _handle_dialog)
+
+            try:
+                # Open the dropdown menu
+                menu_btn.click()
+                self._human_delay(0.6, 1.2)
+
+                # Locate the Delete item — get_by_text is the only reliable way
+                # to find plain text menu items in Forem's floating popover.
+                delete_btn = None
+
+                # Primary: exact text match
+                try:
+                    loc = self._page.get_by_text("Delete", exact=True).first
+                    if loc.is_visible(timeout=3000):
+                        delete_btn = loc
+                        logger.debug(
+                            "Delete option found via get_by_text for %s.",
+                            comment_id_code,
+                        )
+                except PlaywrightTimeoutError:
+                    pass
+
+                # Fallback: role-based selectors
+                if delete_btn is None:
+                    for role in ("button", "link", "menuitem"):
+                        try:
+                            loc = self._page.get_by_role(role, name="Delete").first
+                            if loc.is_visible(timeout=2000):
+                                delete_btn = loc
+                                logger.debug(
+                                    "Delete option found via get_by_role(%s) "
+                                    "for %s.", role, comment_id_code,
+                                )
+                                break
+                        except PlaywrightTimeoutError:
+                            continue
+
+                if delete_btn is None:
+                    self._save_debug_screenshot(
+                        f"delete_option_not_found_{comment_id_code}"
+                    )
+                    logger.warning(
+                        "Delete option not found in open menu for %s.",
+                        comment_id_code,
+                    )
+                    self._page.keyboard.press("Escape")
+                    return False
+
+                # Click Delete — Playwright handles the confirm dialog via handler
+                delete_btn.click()
+                self._human_delay(0.5, 1.0)
+                self._page.wait_for_load_state("domcontentloaded", timeout=5000)
+                self._human_delay(0.5, 1.0)
+
+            except Exception as exc:
+                logger.error(
+                    "Error during delete flow for comment %s: %s",
+                    comment_id_code, exc,
+                )
+                return False
+            finally:
+                try:
+                    self._page.remove_listener("dialog", _handle_dialog)
+                except Exception:
+                    pass
+
+            # Verify deletion: container gone, placeholder visible, or dialog accepted
+            try:
+                still_visible = (
+                    self._page.locator(container_sel).first.is_visible(timeout=2000)
+                )
+                if not still_visible:
+                    logger.info(
+                        "Comment %s deleted — container no longer visible.",
+                        comment_id_code,
+                    )
+                    self._save_session()
+                    return True
+
+                # Forem may leave a "Comment deleted" placeholder
+                try:
+                    placeholder = self._page.get_by_text(
+                        "Comment deleted", exact=False
+                    )
+                    if placeholder.first.is_visible(timeout=2000):
+                        logger.info(
+                            "Comment %s deleted — 'Comment deleted' placeholder visible.",
+                            comment_id_code,
+                        )
+                        self._save_session()
+                        return True
+                except PlaywrightTimeoutError:
+                    pass
+
+                # If dialog was accepted, trust the deletion
+                if dialog_accepted["value"]:
+                    logger.info(
+                        "Comment %s — dialog accepted, treating as deleted.",
+                        comment_id_code,
+                    )
+                    self._save_debug_screenshot(
+                        f"delete_verify_{comment_id_code}"
+                    )
+                    self._save_session()
+                    return True
+
+                logger.warning(
+                    "Comment %s still visible after delete attempt and "
+                    "no dialog was accepted.",
+                    comment_id_code,
+                )
+                self._save_debug_screenshot(
+                    f"delete_failed_verify_{comment_id_code}"
+                )
+                return False
+
+            except PlaywrightTimeoutError:
+                # Timeout on the visibility check most likely means it was deleted
+                logger.info(
+                    "Comment %s — container check timed out (likely deleted).",
+                    comment_id_code,
+                )
+                return True
+
+        except BrowserLoginRequired:
+            logger.error("Cannot delete comment — login required.")  # noqa: TRY400
+            return False
+        except PlaywrightTimeoutError:
+            logger.warning(
+                "Delete comment %s timed out.", comment_id_code,
+            )
+            self._save_debug_screenshot(f"delete_timeout_{comment_id_code}")
+            return False
+        except Exception as exc:
+            logger.exception(
+                "Unexpected browser error deleting comment %s: %s",
                 comment_id_code, exc,
             )
             return False
@@ -1132,14 +1389,14 @@ class DevToBrowser:
             return False
 
         except BrowserLoginRequired:
-            logger.error("Cannot follow — login required.")
+            logger.error("Cannot follow — login required.")  # noqa: TRY400
             return False
         except PlaywrightTimeoutError:
             logger.warning("Follow timed out at %s.", profile_url)
             self._save_debug_screenshot("follow_timeout")
             return False
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 "Unexpected browser error following %s: %s", profile_url, exc,
             )
             return False
@@ -1172,7 +1429,7 @@ class DevToBrowser:
 
     def _human_delay(self, min_s: float = 0.5, max_s: float = 2.0) -> None:
         """Sleep for a random duration to simulate human behavior."""
-        time.sleep(random.uniform(min_s, max_s))
+        time.sleep(random.uniform(min_s, max_s))  # noqa: S311
 
     def _save_debug_screenshot(self, name: str) -> None:
         """Save a screenshot for debugging failed actions."""

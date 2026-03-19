@@ -76,7 +76,7 @@ def main() -> None:
             summary = responder.run()
         print(json.dumps(summary, indent=2))
     except Exception as e:
-        logger.error("Responder failed: %s", e, exc_info=True)
+        logger.exception("Responder failed: %s", e)
         sys.exit(1)
 
 

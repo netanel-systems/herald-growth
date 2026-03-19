@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -10,7 +9,7 @@ from growth.config import GrowthConfig
 from growth.learner import GrowthLearner
 
 
-@pytest.fixture()
+@pytest.fixture
 def config(tmp_path: Path) -> GrowthConfig:
     """GrowthConfig pointing data_dir at tmp_path."""
     cfg = GrowthConfig()
@@ -18,7 +17,7 @@ def config(tmp_path: Path) -> GrowthConfig:
     return cfg
 
 
-@pytest.fixture()
+@pytest.fixture
 def learner(tmp_path: Path) -> GrowthLearner:
     """GrowthLearner with data_dir in tmp_path."""
     cfg = GrowthConfig(project_root=tmp_path)
@@ -74,7 +73,7 @@ def test_analyze_high_engagement_stored(learner: GrowthLearner, tmp_path: Path) 
     assert any(item["action"] == "prioritize" and item["tag"] == "python" for item in result)
     # Learnings file should now exist
     learnings = learner.load_learnings()
-    assert any("prioritize" in l["pattern"] and "python" in l["pattern"] for l in learnings)
+    assert any("prioritize" in entry["pattern"] and "python" in entry["pattern"] for entry in learnings)
 
 
 # ── Test 4: Zero-reciprocity tag stored as 'skip' ────────────────
@@ -105,7 +104,7 @@ def test_analyze_zero_reciprocity_stored(learner: GrowthLearner, tmp_path: Path)
 
     assert any(item["action"] == "skip" and item["tag"] == "badtag" for item in result)
     learnings = learner.load_learnings()
-    assert any("skip" in l["pattern"] and "badtag" in l["pattern"] for l in learnings)
+    assert any("skip" in entry["pattern"] and "badtag" in entry["pattern"] for entry in learnings)
 
 
 # ── Test 5: analyze() returns list of new learning dicts ──────────
@@ -155,5 +154,5 @@ def test_analyze_confidence_bounded(learner: GrowthLearner, tmp_path: Path) -> N
 
     learner.analyze()
     learnings = learner.load_learnings()
-    for l in learnings:
-        assert 0.0 <= l["confidence"] <= 1.0, f"Out-of-bounds confidence: {l['confidence']}"
+    for entry in learnings:
+        assert 0.0 <= entry["confidence"] <= 1.0, f"Out-of-bounds confidence: {entry['confidence']}"

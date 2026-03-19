@@ -62,12 +62,16 @@ damage Klement's reputation and will be logged.
 
 Runs AFTER the main engagement cycles.
 
+**Note:** The production cron uses the devto team bridge (`herald.engagement_playwright`),
+which imports `OwnPostResponder` from this package via sys.path. Fixes here are
+automatically inherited by the bridge.
+
 ```cron
 # Own-post comment engagement — 9 AM UTC
-0 9 * * * cd ~/netanel/teams/herald_growth && .venv/bin/python -m growth.responder_main
+0 9  * * * cd /home/intruder/netanel/teams/devto && .venv/bin/python -m herald.engagement_playwright
 
-# Own-post comment engagement — 3 PM UTC
-0 15 * * * cd ~/netanel/teams/herald_growth && .venv/bin/python -m growth.responder_main
+# Own-post comment engagement — 2 PM UTC
+0 14 * * * cd /home/intruder/netanel/teams/devto && .venv/bin/python -m herald.engagement_playwright
 ```
 
 ### Browser Session Flow

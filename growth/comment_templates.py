@@ -103,7 +103,7 @@ def pick_template_category(last_category: str | None = None) -> str:
     available = [c for c in CATEGORY_IDS if c != last_category]
     if not available:
         available = CATEGORY_IDS
-    return random.choice(available)
+    return random.choice(available)  # noqa: S311
 
 
 def get_template_instruction(category: str) -> str:

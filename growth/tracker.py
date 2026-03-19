@@ -12,7 +12,6 @@ Data stored in data/weekly_report.json and data/follower_snapshots.jsonl.
 import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 
 from growth.attribution import calculate_fbr
 from growth.client import DevToClient, DevToError

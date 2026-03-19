@@ -27,7 +27,7 @@ from growth.engagement_state import EngagementState
 from growth.learner import GrowthLearner
 from growth.schema import build_engagement_entry, generate_cycle_id
 from growth.scout import ArticleScout
-from growth.storage import load_json_ids, save_json_ids
+from growth.storage import atomic_trim_jsonl, load_json_ids, save_json_ids
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ def _notify_session_expired(data_dir: Path) -> None:
 def pick_reaction_category() -> str:
     """Weighted random pick of reaction category."""
     categories, weights = zip(*REACTION_WEIGHTS)
-    return random.choices(categories, weights=weights, k=1)[0]
+    return random.choices(categories, weights=weights, k=1)[0]  # noqa: S311
 
 
 class ReactionEngine:
@@ -146,33 +146,10 @@ class ReactionEngine:
 
     def trim_engagement_log(self) -> None:
         """Trim engagement log to max_engagement_log entries. Atomic write."""
-        import os
-        import tempfile
-
-        path = self.data_dir / "engagement_log.jsonl"
-        if not path.exists():
-            return
-        lines = [line for line in path.read_text().strip().split("\n") if line.strip()]
-        if len(lines) > self.config.max_engagement_log:
-            trimmed = lines[-self.config.max_engagement_log:]
-            content = "\n".join(trimmed) + "\n"
-            fd, tmp_path = tempfile.mkstemp(
-                dir=path.parent, suffix=".tmp", prefix=".engagement_",
-            )
-            try:
-                with os.fdopen(fd, "w") as f:
-                    f.write(content)
-                os.replace(tmp_path, path)
-            except Exception:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
-            logger.info(
-                "Trimmed engagement log: %d -> %d entries.",
-                len(lines), len(trimmed),
-            )
+        atomic_trim_jsonl(
+            self.data_dir / "engagement_log.jsonl",
+            self.config.max_engagement_log,
+        )
 
     def _start_browser(self) -> DevToBrowser:
         """Lazy-init and start the browser if not already running."""
@@ -361,7 +338,7 @@ class ReactionEngine:
 
                 # Randomized delay between reactions (D2: +/-30%)
                 if idx < max_reactions - 1:
-                    delay = self.config.reaction_delay * random.uniform(0.7, 1.3)
+                    delay = self.config.reaction_delay * random.uniform(0.7, 1.3)  # noqa: S311
                     time.sleep(delay)
 
             # Save updated reacted IDs

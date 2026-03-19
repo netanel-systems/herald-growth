@@ -20,13 +20,13 @@ from growth.browser import BrowserLoginRequired, DevToBrowser
 from growth.config import GrowthConfig
 
 
-@pytest.fixture()
+@pytest.fixture
 def config() -> GrowthConfig:
     """Minimal GrowthConfig for tests."""
     return GrowthConfig()
 
 
-@pytest.fixture()
+@pytest.fixture
 def browser(config: GrowthConfig, tmp_path) -> DevToBrowser:
     """DevToBrowser with mocked page (no real browser launched)."""
     b = DevToBrowser(config)
@@ -118,21 +118,20 @@ def test_already_liked_returns_true(browser: DevToBrowser) -> None:
 
 def test_successful_like_returns_true(browser: DevToBrowser) -> None:
     """Full success path: click like button, activation confirmed."""
-    with patch.object(browser, "ensure_logged_in"):
-        with patch.object(browser, "_save_session"):
-            container = _locator(visible=True)
-            like_btn = _locator(visible=True, cls="comment__like-button")
+    with patch.object(browser, "ensure_logged_in"), patch.object(browser, "_save_session"):
+        container = _locator(visible=True)
+        like_btn = _locator(visible=True, cls="comment__like-button")
 
-            # After click, class should include "reacted"
-            like_btn.get_attribute.side_effect = [
-                "comment__like-button",  # first check: not yet liked
-                "comment__like-button reacted",  # after click: liked
-            ]
+        # After click, class should include "reacted"
+        like_btn.get_attribute.side_effect = [
+            "comment__like-button",  # first check: not yet liked
+            "comment__like-button reacted",  # after click: liked
+        ]
 
-            container.locator.return_value = like_btn
-            browser._page.locator.return_value = container
+        container.locator.return_value = like_btn
+        browser._page.locator.return_value = container
 
-            result = browser.like_comment("abc12", "https://dev.to/a/b")
+        result = browser.like_comment("abc12", "https://dev.to/a/b")
 
     assert result is True
     like_btn.click.assert_called_once()
@@ -172,18 +171,20 @@ def test_like_click_without_activation_class_returns_false(
     Previously this case returned True, but that masked throttled/intercepted
     clicks and prevented future retries.  Unknown outcome must be False.
     """
-    with patch.object(browser, "ensure_logged_in"):
-        with patch.object(browser, "_save_session") as mock_save:
-            container = _locator(visible=True)
-            like_btn = _locator(visible=True, cls="comment__like-button")
+    with (
+        patch.object(browser, "ensure_logged_in"),
+        patch.object(browser, "_save_session") as mock_save,
+    ):
+        container = _locator(visible=True)
+        like_btn = _locator(visible=True, cls="comment__like-button")
 
-            # Class never changes to include "reacted"
-            like_btn.get_attribute.return_value = "comment__like-button"
+        # Class never changes to include "reacted"
+        like_btn.get_attribute.return_value = "comment__like-button"
 
-            container.locator.return_value = like_btn
-            browser._page.locator.return_value = container
+        container.locator.return_value = like_btn
+        browser._page.locator.return_value = container
 
-            result = browser.like_comment("abc12", "https://dev.to/a/b")
+        result = browser.like_comment("abc12", "https://dev.to/a/b")
 
     assert result is False
     like_btn.click.assert_called_once()
