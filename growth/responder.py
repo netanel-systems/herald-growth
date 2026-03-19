@@ -21,9 +21,11 @@ using the read-only API client. Writes (like + reply) go through Playwright brow
 """
 
 import contextlib
+import fcntl
 import json
 import logging
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +36,9 @@ from growth.engagement_state import EngagementState
 from growth.storage import atomic_write_json
 
 logger = logging.getLogger(__name__)
+
+# Lock file name for single-instance enforcement
+LOCK_FILE_NAME = ".responder.lock"
 
 # Max comments to process per run (rate-limit safety)
 MAX_COMMENTS_PER_RUN = 10
@@ -47,6 +52,10 @@ MAX_REPLIED_ARTICLES = 500
 MAX_REPLIES_PER_COMMENTER = 1
 # Safety cap: never delete more than this many orphaned replies per run
 MAX_ORPHAN_DELETIONS_PER_RUN = 10
+
+
+class ProcessLockHeld(Exception):
+    """Raised when another responder instance already holds the process lock."""
 
 
 class OwnPostResponder:
@@ -96,6 +105,42 @@ class OwnPostResponder:
         if self._engagement_state is None:
             self._engagement_state = EngagementState(self.data_dir)
         return self._engagement_state
+
+    # ── Process Lock ──────────────────────────────────────────────────────
+
+    @contextmanager
+    def _run_lock(self):
+        """Acquire an exclusive POSIX advisory lock to prevent overlapping runs.
+
+        Uses fcntl.flock(LOCK_EX | LOCK_NB) on a lock file in data_dir.
+        If another process already holds the lock, raises ProcessLockHeld
+        immediately (non-blocking) so the caller can exit cleanly.
+
+        The lock is automatically released when the context manager exits
+        (file descriptor closed), even on unhandled exceptions.
+
+        Yields:
+            None — the lock is held for the duration of the with-block.
+
+        Raises:
+            ProcessLockHeld: Another responder instance is already running.
+        """
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self.data_dir / LOCK_FILE_NAME
+        fd = open(lock_path, "w")  # noqa: SIM115
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fd.close()
+            raise ProcessLockHeld(
+                f"Another responder instance is already running (lock: {lock_path})"
+            )
+        logger.info("Process lock acquired: %s", lock_path)
+        try:
+            yield
+        finally:
+            fd.close()
+            logger.info("Process lock released: %s", lock_path)
 
     # ── Storage ────────────────────────────────────────────────────────────
 
@@ -728,6 +773,11 @@ class OwnPostResponder:
     def run(self) -> dict:
         """Main entry point. Processes comments on our own articles.
 
+        Acquires a POSIX advisory lock before starting. If another instance
+        is already running (e.g. slow Playwright run from previous cron),
+        returns immediately with an empty summary instead of creating
+        duplicate replies.
+
         Enforces two additional guards beyond comment-ID dedup:
 
         1. Per-commenter limit: at most MAX_REPLIES_PER_COMMENTER replies per
@@ -740,6 +790,27 @@ class OwnPostResponder:
 
         Returns summary dict with counts for monitoring/logging.
         """
+        try:
+            with self._run_lock():
+                return self._run_inner()
+        except ProcessLockHeld:
+            logger.warning(
+                "=== OwnPostResponder SKIPPED — another instance is running ==="
+            )
+            return {
+                "articles_checked": 0,
+                "comments_found": 0,
+                "liked": 0,
+                "replied": 0,
+                "skipped": 0,
+                "trolls_skipped": 0,
+                "orphans_cleaned": 0,
+                "elapsed_seconds": 0.0,
+                "lock_skipped": True,
+            }
+
+    def _run_inner(self) -> dict:
+        """Core run logic, called while holding the process lock."""
         logger.info("=== OwnPostResponder cycle starting ===")
         start = time.time()
 

@@ -1132,5 +1132,118 @@ class TestCleanOrphanedReplies(unittest.TestCase):
         responder.browser.delete_comment.assert_called()
 
 
+class TestRunLock(unittest.TestCase):
+    """Test _run_lock() — POSIX advisory lock preventing overlapping responder runs."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp())
+        self.config = _make_config(self.tmp)
+        self.data_dir = self.config.abs_data_dir
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+
+    def _make_responder(self, llm_fn=None):
+        mock_client = MagicMock()
+        mock_browser = MagicMock()
+        mock_browser.like_comment.return_value = True
+        mock_browser.reply_to_comment.return_value = {"status": "replied"}
+        if llm_fn is None:
+            def llm_fn(body, title):  # noqa: E306
+                return "Interesting point about that specific thing."
+        return OwnPostResponder(mock_client, self.config, mock_browser, llm_fn)
+
+    def test_run_lock_acquires_and_releases(self):
+        """_run_lock() creates a lock file and releases it on exit."""
+        from growth.responder import LOCK_FILE_NAME
+
+        responder = self._make_responder()
+        lock_path = self.data_dir / LOCK_FILE_NAME
+
+        with responder._run_lock():
+            assert lock_path.exists(), "Lock file must be created"
+
+        # After exiting, the file still exists but the lock is released
+        assert lock_path.exists()
+
+    def test_run_lock_prevents_second_instance(self):
+        """A second _run_lock() call while the first holds the lock raises ProcessLockHeld."""
+        import fcntl
+        from growth.responder import LOCK_FILE_NAME, ProcessLockHeld
+
+        responder = self._make_responder()
+        lock_path = self.data_dir / LOCK_FILE_NAME
+
+        # Simulate another process holding the lock
+        with open(lock_path, "w") as fd:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            # Second instance should fail
+            with self.assertRaises(ProcessLockHeld):
+                with responder._run_lock():
+                    self.fail("Should not reach here — lock should be held")
+
+    def test_run_lock_released_after_exception_in_body(self):
+        """Lock is released even when the with-block raises an exception."""
+        import fcntl
+        from growth.responder import LOCK_FILE_NAME
+
+        responder = self._make_responder()
+        lock_path = self.data_dir / LOCK_FILE_NAME
+
+        with self.assertRaises(ValueError):
+            with responder._run_lock():
+                raise ValueError("simulated failure")
+
+        # Lock should be released — another lock acquisition should succeed
+        with open(lock_path, "w") as fd:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # If we get here, the lock was properly released
+            fcntl.flock(fd, fcntl.LOCK_UN)
+
+    def test_run_returns_lock_skipped_when_locked(self):
+        """run() returns a summary with lock_skipped=True when lock is held."""
+        import fcntl
+        from growth.responder import LOCK_FILE_NAME
+
+        responder = self._make_responder()
+        lock_path = self.data_dir / LOCK_FILE_NAME
+
+        # Simulate another process holding the lock
+        with open(lock_path, "w") as fd:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            summary = responder.run()
+
+            assert summary["lock_skipped"] is True
+            assert summary["replied"] == 0
+            assert summary["articles_checked"] == 0
+
+    def test_run_processes_normally_when_lock_available(self):
+        """run() processes comments normally when no other instance is running."""
+        responder = self._make_responder()
+        responder.client.get_articles_by_username.return_value = [
+            _make_article(1, "My Article", "https://dev.to/testuser/my-article")
+        ]
+        responder.client.get_article_comments.return_value = [
+            _make_comment("newcode", "reader", "I learned a lot from this section.")
+        ]
+
+        summary = responder.run()
+
+        assert summary["replied"] == 1
+        assert "lock_skipped" not in summary
+
+    def test_lock_file_created_in_data_dir(self):
+        """Lock file is created inside the configured data directory."""
+        from growth.responder import LOCK_FILE_NAME
+
+        responder = self._make_responder()
+        expected_path = self.data_dir / LOCK_FILE_NAME
+
+        with responder._run_lock():
+            assert expected_path.exists()
+            assert expected_path.parent == self.data_dir
+
+
 if __name__ == "__main__":
     unittest.main()
