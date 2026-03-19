@@ -127,23 +127,20 @@ class OwnPostResponder:
         """
         self.data_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.data_dir / LOCK_FILE_NAME
-        fd = None
+        fd = open(lock_path, "w")  # noqa: SIM115
         try:
-            fd = open(lock_path, "w")  # noqa: SIM115
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            logger.info("Process lock acquired: %s", lock_path)
-            yield
         except OSError:
-            if fd is not None:
-                fd.close()
-                fd = None
+            fd.close()
             raise ProcessLockHeld(
                 f"Another responder instance is already running (lock: {lock_path})"
             )
+        logger.info("Process lock acquired: %s", lock_path)
+        try:
+            yield
         finally:
-            if fd is not None:
-                fd.close()
-                logger.info("Process lock released: %s", lock_path)
+            fd.close()
+            logger.info("Process lock released: %s", lock_path)
 
     # ── Storage ────────────────────────────────────────────────────────────
 
